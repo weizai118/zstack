@@ -1,7 +1,9 @@
 package org.zstack.network.service.portforwarding;
 
+import org.zstack.header.identity.OwnedByAccount;
 import org.zstack.header.vm.VmNicVO;
 import org.zstack.header.vo.BaseResource;
+import org.zstack.header.vo.EntityGraph;
 import org.zstack.header.vo.ForeignKey;
 import org.zstack.header.vo.ForeignKey.ReferenceOption;
 import org.zstack.header.vo.Index;
@@ -14,7 +16,16 @@ import java.sql.Timestamp;
 @Entity
 @Table
 @BaseResource
-public class PortForwardingRuleVO extends ResourceVO {
+@EntityGraph(
+        parents = {
+                @EntityGraph.Neighbour(type = VipVO.class, myField = "vipUuid", targetField = "uuid"),
+        },
+
+        friends = {
+                @EntityGraph.Neighbour(type = VmNicVO.class, myField = "vmNicUuid", targetField = "uuid"),
+        }
+)
+public class PortForwardingRuleVO extends ResourceVO implements OwnedByAccount {
     @Column
     @Index
     private String name;
@@ -68,6 +79,20 @@ public class PortForwardingRuleVO extends ResourceVO {
     
     @Column
     private Timestamp lastOpDate;
+
+    @Transient
+    private String accountUuid;
+
+    @Override
+    public String getAccountUuid() {
+        return accountUuid;
+    }
+
+    @Override
+    public void setAccountUuid(String accountUuid) {
+        this.accountUuid = accountUuid;
+    }
+
 
     @PreUpdate
     private void preUpdate() {

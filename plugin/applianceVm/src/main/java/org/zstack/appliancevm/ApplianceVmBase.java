@@ -93,11 +93,11 @@ public abstract class ApplianceVmBase extends VmInstanceBase implements Applianc
     }
 
     @Override
-    protected void destroyHook(VmInstanceDeletionPolicy deletionPolicy, final Completion completion){
+    protected void destroyHook(VmInstanceDeletionPolicy deletionPolicy, Message msg, final Completion completion){
         logger.debug(String.format("deleting appliance vm[uuid:%s], always use Direct deletion policy", self.getUuid()));
         VmInstanceDeletionPolicy policy = (deletionPolicy == VmInstanceDeletionPolicy.DBOnly)
                 ? deletionPolicy : VmInstanceDeletionPolicy.Direct;
-        super.doDestroy(policy, completion);
+        super.doDestroy(policy, msg, completion);
     }
 
     @Override
@@ -618,7 +618,7 @@ public abstract class ApplianceVmBase extends VmInstanceBase implements Applianc
     }
 
     @Override
-    protected void startVmFromNewCreate(final StartNewCreatedVmInstanceMsg msg, final SyncTaskChain taskChain) {
+    protected void instantiateVmFromNewCreate(final InstantiateNewCreatedVmInstanceMsg msg, final SyncTaskChain taskChain) {
         boolean callNext = true;
         try {
             refreshVO();
@@ -675,6 +675,7 @@ public abstract class ApplianceVmBase extends VmInstanceBase implements Applianc
             ImageVO imvo = dbf.findByUuid(spec.getVmInventory().getImageUuid(), ImageVO.class);
             spec.getImageSpec().setInventory(ImageInventory.valueOf(imvo));
 
+            spec.putExtensionData(ApplianceVmConstant.Params.timeout.toString(), msg.getTimeout());
             spec.putExtensionData(ApplianceVmConstant.Params.applianceVmSpec.toString(), aspec);
             spec.setCurrentVmOperation(VmInstanceConstant.VmOperation.NewCreate);
             spec.putExtensionData(ApplianceVmConstant.Params.applianceVmSubType.toString(), getSelf().getApplianceVmType());
@@ -734,7 +735,7 @@ public abstract class ApplianceVmBase extends VmInstanceBase implements Applianc
                             self.getUuid(), self.getName(), getSelf().getApplianceVmType()));
                     VmInstanceInventory inv = VmInstanceInventory.valueOf(self);
                     extEmitter.afterStartNewCreatedVm(inv);
-                    StartNewCreatedVmInstanceReply reply = new StartNewCreatedVmInstanceReply();
+                    InstantiateNewCreatedVmInstanceReply reply = new InstantiateNewCreatedVmInstanceReply();
                     reply.setVmInventory(inv);
                     bus.reply(msg, reply);
                     taskChain.next();
@@ -744,7 +745,7 @@ public abstract class ApplianceVmBase extends VmInstanceBase implements Applianc
                 public void handle(ErrorCode errCode, Map data) {
                     extEmitter.failedToStartNewCreatedVm(VmInstanceInventory.valueOf(self), errCode);
                     dbf.remove(self);
-                    StartNewCreatedVmInstanceReply reply = new StartNewCreatedVmInstanceReply();
+                    InstantiateNewCreatedVmInstanceReply reply = new InstantiateNewCreatedVmInstanceReply();
                     reply.setError(errCode);
                     reply.setSuccess(false);
                     bus.reply(msg, reply);

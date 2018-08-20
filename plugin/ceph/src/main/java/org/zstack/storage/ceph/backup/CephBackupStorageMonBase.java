@@ -4,6 +4,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.zstack.core.CoreGlobalProperty;
 import org.zstack.core.ansible.AnsibleGlobalProperty;
 import org.zstack.core.ansible.AnsibleRunner;
+import org.zstack.core.ansible.SshChronyConfigChecker;
 import org.zstack.core.ansible.SshFileMd5Checker;
 import org.zstack.core.db.DatabaseFacade;
 import org.zstack.core.db.SimpleQuery;
@@ -162,8 +163,16 @@ public class CephBackupStorageMonBase extends CephMonBase {
                             checker.addSrcDestPair(SshFileMd5Checker.ZSTACKLIB_SRC_PATH, String.format("/var/lib/zstack/cephb/package/%s", AnsibleGlobalProperty.ZSTACKLIB_PACKAGE_NAME));
                             checker.addSrcDestPair(PathUtil.findFileOnClassPath(String.format("ansible/cephb/%s", CephGlobalProperty.BACKUP_STORAGE_PACKAGE_NAME), true).getAbsolutePath(),
                                     String.format("/var/lib/zstack/cephb/package/%s", CephGlobalProperty.BACKUP_STORAGE_PACKAGE_NAME));
+
+                            SshChronyConfigChecker chronyChecker = new SshChronyConfigChecker();
+                            chronyChecker.setTargetIp(getSelf().getHostname());
+                            chronyChecker.setUsername(getSelf().getSshUsername());
+                            chronyChecker.setPassword(getSelf().getSshPassword());
+                            chronyChecker.setSshPort(getSelf().getSshPort());
+
                             AnsibleRunner runner = new AnsibleRunner();
                             runner.installChecker(checker);
+                            runner.installChecker(chronyChecker);
                             runner.setPassword(getSelf().getSshPassword());
                             runner.setUsername(getSelf().getSshUsername());
                             runner.setTargetIp(getSelf().getHostname());
@@ -171,7 +180,11 @@ public class CephBackupStorageMonBase extends CephMonBase {
                             runner.setAgentPort(CephGlobalProperty.BACKUP_STORAGE_AGENT_PORT);
                             runner.setPlayBookName(CephGlobalProperty.BACKUP_STORAGE_PLAYBOOK_NAME);
                             runner.putArgument("pkg_cephbagent", CephGlobalProperty.BACKUP_STORAGE_PACKAGE_NAME);
-                            if (CoreGlobalProperty.CHRONY_SERVERS != null && !CoreGlobalProperty.CHRONY_SERVERS.isEmpty()) {
+                            if (CoreGlobalProperty.SYNC_NODE_TIME) {
+                                if (CoreGlobalProperty.CHRONY_SERVERS == null || CoreGlobalProperty.CHRONY_SERVERS.isEmpty()) {
+                                    trigger.fail(operr("chrony server not configured!"));
+                                    return;
+                                }
                                 runner.putArgument("chrony_servers", String.join(",", CoreGlobalProperty.CHRONY_SERVERS));
                             }
                             runner.run(new Completion(trigger) {
@@ -301,7 +314,7 @@ public class CephBackupStorageMonBase extends CephMonBase {
 
         PingCmd cmd = new PingCmd();
         cmd.monAddr = String.format("%s:%s", getSelf().getMonAddr(), getSelf().getMonPort());
-        cmd.testImagePath = String.format("%s/%s-this-is-a-test-image-with-long-name", poolName, self.getUuid());
+        cmd.testImagePath = String.format("%s/zshb.bs.%s.%s", poolName, self.getUuid(), self.getMonAddr());
         cmd.monUuid = getSelf().getUuid();
         cmd.backupStorageUuid = getSelf().getBackupStorageUuid();
 

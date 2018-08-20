@@ -3,6 +3,7 @@ package org.zstack.storage.primary.local;
 import org.apache.commons.lang.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.zstack.compute.vm.ImageBackupStorageSelector;
+import org.zstack.core.asyncbatch.While;
 import org.zstack.core.cloudbus.CloudBusCallBack;
 import org.zstack.core.cloudbus.CloudBusListCallBack;
 import org.zstack.core.cloudbus.MessageSafe;
@@ -19,9 +20,7 @@ import org.zstack.core.workflow.FlowChainBuilder;
 import org.zstack.core.workflow.ShareFlow;
 import org.zstack.header.HasThreadContext;
 import org.zstack.header.cluster.ClusterInventory;
-import org.zstack.header.core.ApiTimeout;
-import org.zstack.header.core.Completion;
-import org.zstack.header.core.ReturnValueCompletion;
+import org.zstack.header.core.*;
 import org.zstack.header.core.progress.TaskProgressRange;
 import org.zstack.header.core.validation.Validation;
 import org.zstack.header.core.workflow.*;
@@ -61,6 +60,8 @@ import org.zstack.utils.path.PathUtil;
 import javax.persistence.Tuple;
 import java.io.File;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 import static org.zstack.core.Platform.operr;
 import static org.zstack.core.progress.ProgressReportService.*;
@@ -84,7 +85,7 @@ public class LocalStorageKvmBackend extends LocalStorageHypervisorBackend {
     private PluginRegistry pluginRgty;
 
 
-    public static class AgentCommand {
+    public static class AgentCommand extends KVMAgentCommands.AgentCommand {
         public String uuid;
         public String storagePath;
     }
@@ -534,7 +535,7 @@ public class LocalStorageKvmBackend extends LocalStorageHypervisorBackend {
     }
 
     @ApiTimeout(apiClasses = {APIDeleteVolumeSnapshotMsg.class})
-    public static class OfflineMergeSnapshotCmd extends AgentCommand {
+    public static class OfflineMergeSnapshotCmd extends AgentCommand implements HasThreadContext {
         private String srcPath;
         private String destPath;
         private boolean fullRebase;
@@ -731,6 +732,11 @@ public class LocalStorageKvmBackend extends LocalStorageHypervisorBackend {
     public String makeSnapshotInstallPath(VolumeInventory vol, VolumeSnapshotInventory snapshot) {
         String volDir = makeVolumeInstallDir(vol);
         return PathUtil.join(volDir, "snapshots", String.format("%s.qcow2", snapshot.getUuid()));
+    }
+
+    public String makeSnapshotInstallPath(VolumeInventory vol, String snapshotUuid) {
+        String volDir = makeVolumeInstallDir(vol);
+        return PathUtil.join(volDir, "snapshots", String.format("%s.qcow2", snapshotUuid));
     }
 
     public String makeSnapshotWorkspacePath(String imageUuid) {
@@ -1393,7 +1399,7 @@ public class LocalStorageKvmBackend extends LocalStorageHypervisorBackend {
     @Override
     void handle(DeleteVolumeBitsOnPrimaryStorageMsg msg, final ReturnValueCompletion<DeleteVolumeBitsOnPrimaryStorageReply> completion) {
         String hostUuid = getHostUuidByResourceUuid(msg.getBitsUuid(), msg.getBitsType());
-        deleteBits(PathUtil.parentFolder(msg.getInstallPath()), hostUuid, true, new Completion(completion) {
+        deleteBits(msg.getInstallPath(), hostUuid, true, new Completion(completion) {
             @Override
             public void success() {
                 DeleteVolumeBitsOnPrimaryStorageReply reply = new DeleteVolumeBitsOnPrimaryStorageReply();
@@ -2557,16 +2563,39 @@ public class LocalStorageKvmBackend extends LocalStorageHypervisorBackend {
     public void attachHook(String clusterUuid, final Completion completion) {
         // get all hosts of cluster
         SimpleQuery<HostVO> q = dbf.createQuery(HostVO.class);
-        q.select(HostVO_.uuid);
+        q.select(HostVO_.uuid, HostVO_.status);
         q.add(HostVO_.clusterUuid, Op.EQ, clusterUuid);
-        final List<String> hostUuids = q.listValue();
+        final List<Tuple> ts = q.listTuple();
 
-        if (hostUuids.isEmpty()) {
+        if (ts.isEmpty()) {
             completion.success();
             return;
         }
 
+        List<String> connectedHostUuids = ts.stream()
+                .filter(it -> it.get(1, HostStatus.class) == HostStatus.Connected)
+                .map(it -> it.get(0, String.class))
+                .collect(Collectors.toList());
+        List<String> disconnectedHostUuids = ts.stream()
+                .filter(it -> it.get(1, HostStatus.class) != HostStatus.Connected)
+                .map(it -> it.get(0, String.class))
+                .collect(Collectors.toList());
+
         // make init msg for each host
+        initHosts(connectedHostUuids, completion);
+        initHosts(disconnectedHostUuids, true, new NopeCompletion());
+    }
+
+    private void initHosts(List<String> hostUuids, Completion completion){
+        initHosts(hostUuids, false, completion);
+    }
+
+    private void initHosts(List<String> hostUuids, boolean noCheckStatus, Completion completion){
+        if (hostUuids.isEmpty()) {
+            completion.success();
+            return;
+        }
+        
         List<KVMHostAsyncHttpCallMsg> msgs = CollectionUtils.transformToList(hostUuids,
                 new Function<KVMHostAsyncHttpCallMsg, String>() {
                     @Override
@@ -2581,6 +2610,7 @@ public class LocalStorageKvmBackend extends LocalStorageHypervisorBackend {
                         msg.setCommandTimeout(timeoutMgr.getTimeout(cmd.getClass(), "5m"));
                         msg.setPath(INIT_PATH);
                         msg.setHostUuid(arg);
+                        msg.setNoStatusCheck(noCheckStatus);
                         bus.makeTargetServiceIdByResourceUuid(msg, HostConstant.SERVICE_ID, arg);
                         return msg;
                     }
@@ -2633,13 +2663,10 @@ public class LocalStorageKvmBackend extends LocalStorageHypervisorBackend {
                     ref.setTotalPhysicalCapacity(rsp.getTotalCapacity());
                     ref.setSystemUsedCapacity(rsp.getTotalCapacity() - rsp.getAvailableCapacity());
                     refs.add(ref);
-
                 }
 
                 dbf.persistCollection(refs);
-
                 increaseCapacity(total, avail, total, avail, systemUsed);
-
                 completion.success();
             }
         });
@@ -2818,5 +2845,12 @@ public class LocalStorageKvmBackend extends LocalStorageHypervisorBackend {
                 });
             }
         }).start();
+    }
+
+    @Override
+    public void handle(AskInstallPathForNewSnapshotMsg msg, ReturnValueCompletion<AskInstallPathForNewSnapshotReply> completion) {
+        AskInstallPathForNewSnapshotReply reply = new AskInstallPathForNewSnapshotReply();
+        reply.setSnapshotInstallPath(makeSnapshotInstallPath(msg.getVolumeInventory(), msg.getSnapshotUuid()));
+        completion.success(reply);
     }
 }

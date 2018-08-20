@@ -54,7 +54,6 @@ import org.zstack.header.vm.CreateTemplateFromVmRootVolumeReply;
 import org.zstack.header.vm.VmInstanceConstant;
 import org.zstack.header.volume.*;
 import org.zstack.identity.AccountManager;
-import org.zstack.identity.QuotaGlobalConfig;
 import org.zstack.identity.QuotaUtil;
 import org.zstack.search.SearchQuery;
 import org.zstack.tag.TagManager;
@@ -66,7 +65,8 @@ import org.zstack.utils.logging.CLogger;
 
 import javax.persistence.Tuple;
 import javax.persistence.TypedQuery;
-import java.net.*;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.sql.Timestamp;
 import java.util.*;
 import java.util.concurrent.Callable;
@@ -188,52 +188,64 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
     private void handle(final APICreateRootVolumeTemplateFromVolumeSnapshotMsg msg) {
         final APICreateRootVolumeTemplateFromVolumeSnapshotEvent evt = new APICreateRootVolumeTemplateFromVolumeSnapshotEvent(msg.getId());
 
-        SimpleQuery<VolumeSnapshotVO> q = dbf.createQuery(VolumeSnapshotVO.class);
-        q.select(VolumeSnapshotVO_.format);
-        q.add(VolumeSnapshotVO_.uuid, Op.EQ, msg.getSnapshotUuid());
-        String format = q.findValue();
-
-        final ImageVO vo = new ImageVO();
-        if (msg.getResourceUuid() != null) {
-            vo.setUuid(msg.getResourceUuid());
-        } else {
-            vo.setUuid(Platform.getUuid());
+        class Result {
+            List<CreateTemplateFromVolumeSnapshotMsg> msgs;
+            ImageVO image;
         }
-        vo.setName(msg.getName());
-        vo.setSystem(msg.isSystem());
-        vo.setDescription(msg.getDescription());
-        vo.setPlatform(ImagePlatform.valueOf(msg.getPlatform()));
-        vo.setGuestOsType(msg.getGuestOsType());
-        vo.setStatus(ImageStatus.Creating);
-        vo.setState(ImageState.Enabled);
-        vo.setFormat(format);
-        vo.setMediaType(ImageMediaType.RootVolumeTemplate);
-        vo.setType(ImageConstant.ZSTACK_IMAGE_TYPE);
-        vo.setUrl(String.format("volumeSnapshot://%s", msg.getSnapshotUuid()));
-        dbf.persist(vo);
 
-        acntMgr.createAccountResourceRef(msg.getSession().getAccountUuid(), vo.getUuid(), ImageVO.class);
-        tagMgr.createTagsFromAPICreateMessage(msg, vo.getUuid(), ImageVO.class.getSimpleName());
+        Result res = new Result();
+        new SQLBatch() {
+            @Override
+            protected void scripts() {
+                String format = q(VolumeSnapshotVO.class).select(VolumeSnapshotVO_.format)
+                        .eq(VolumeSnapshotVO_.uuid, msg.getSnapshotUuid()).findValue();
 
-        SimpleQuery<VolumeSnapshotVO> sq = dbf.createQuery(VolumeSnapshotVO.class);
-        sq.select(VolumeSnapshotVO_.volumeUuid, VolumeSnapshotVO_.treeUuid);
-        sq.add(VolumeSnapshotVO_.uuid, Op.EQ, msg.getSnapshotUuid());
-        Tuple t = sq.findTuple();
-        String volumeUuid = t.get(0, String.class);
-        String treeUuid = t.get(1, String.class);
+                final ImageVO vo = new ImageVO();
+                if (msg.getResourceUuid() != null) {
+                    vo.setUuid(msg.getResourceUuid());
+                } else {
+                    vo.setUuid(Platform.getUuid());
+                }
+                vo.setName(msg.getName());
+                vo.setSystem(msg.isSystem());
+                vo.setDescription(msg.getDescription());
+                vo.setPlatform(ImagePlatform.valueOf(msg.getPlatform()));
+                vo.setGuestOsType(msg.getGuestOsType());
+                vo.setStatus(ImageStatus.Creating);
+                vo.setState(ImageState.Enabled);
+                vo.setFormat(format);
+                vo.setMediaType(ImageMediaType.RootVolumeTemplate);
+                vo.setType(ImageConstant.ZSTACK_IMAGE_TYPE);
+                vo.setUrl(String.format("volumeSnapshot://%s", msg.getSnapshotUuid()));
+                vo.setAccountUuid(msg.getSession().getAccountUuid());
+                persist(vo);
 
-        List<CreateTemplateFromVolumeSnapshotMsg> cmsgs = msg.getBackupStorageUuids().stream().map(bsUuid -> {
-            CreateTemplateFromVolumeSnapshotMsg cmsg = new CreateTemplateFromVolumeSnapshotMsg();
-            cmsg.setSnapshotUuid(msg.getSnapshotUuid());
-            cmsg.setImageUuid(vo.getUuid());
-            cmsg.setVolumeUuid(volumeUuid);
-            cmsg.setTreeUuid(treeUuid);
-            cmsg.setBackupStorageUuid(bsUuid);
-            String resourceUuid = volumeUuid != null ? volumeUuid : treeUuid;
-            bus.makeTargetServiceIdByResourceUuid(cmsg, VolumeSnapshotConstant.SERVICE_ID, resourceUuid);
-            return cmsg;
-        }).collect(Collectors.toList());
+                tagMgr.createTagsFromAPICreateMessage(msg, vo.getUuid(), ImageVO.class.getSimpleName());
 
+                Tuple t = q(VolumeSnapshotVO.class).select(VolumeSnapshotVO_.volumeUuid, VolumeSnapshotVO_.treeUuid)
+                        .eq(VolumeSnapshotVO_.uuid, msg.getSnapshotUuid()).findTuple();
+                String volumeUuid = t.get(0, String.class);
+                String treeUuid = t.get(1, String.class);
+
+                List<CreateTemplateFromVolumeSnapshotMsg> cmsgs = msg.getBackupStorageUuids().stream().map(bsUuid -> {
+                    CreateTemplateFromVolumeSnapshotMsg cmsg = new CreateTemplateFromVolumeSnapshotMsg();
+                    cmsg.setSnapshotUuid(msg.getSnapshotUuid());
+                    cmsg.setImageUuid(vo.getUuid());
+                    cmsg.setVolumeUuid(volumeUuid);
+                    cmsg.setTreeUuid(treeUuid);
+                    cmsg.setBackupStorageUuid(bsUuid);
+                    String resourceUuid = volumeUuid != null ? volumeUuid : treeUuid;
+                    bus.makeTargetServiceIdByResourceUuid(cmsg, VolumeSnapshotConstant.SERVICE_ID, resourceUuid);
+                    return cmsg;
+                }).collect(Collectors.toList());
+
+                res.msgs = cmsgs;
+                res.image = vo;
+            }
+        }.execute();
+
+        List<CreateTemplateFromVolumeSnapshotMsg> cmsgs = res.msgs;
+        ImageVO vo = res.image;
 
         List<Failure> failures = new ArrayList<>();
         AsyncLatch latch = new AsyncLatch(cmsgs.size(), new NoErrorCompletion(msg) {
@@ -530,6 +542,10 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
                         check((APIRecoverImageMsg) msg, pairs);
                     } else if (msg instanceof APIChangeResourceOwnerMsg) {
                         check((APIChangeResourceOwnerMsg) msg, pairs);
+                    } else if (msg instanceof APICreateRootVolumeTemplateFromRootVolumeMsg) {
+                        check((APICreateRootVolumeTemplateFromRootVolumeMsg) msg, pairs);
+                    } else if (msg instanceof APICreateDataVolumeTemplateFromVolumeMsg) {
+                        check((APICreateDataVolumeTemplateFromVolumeMsg) msg, pairs);
                     }
                 } else {
                     if (msg instanceof APIChangeResourceOwnerMsg) {
@@ -655,6 +671,27 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
             private void check(APIAddImageMsg msg, Map<String, Quota.QuotaPair> pairs) {
                 String currentAccountUuid = msg.getSession().getAccountUuid();
                 String resourceTargetOwnerAccountUuid = msg.getSession().getAccountUuid();
+
+                checkImageNumQuota(currentAccountUuid, resourceTargetOwnerAccountUuid, pairs);
+                new ImageQuotaUtil().checkImageSizeQuotaUseHttpHead(msg, pairs);
+            }
+
+            private void check(APICreateRootVolumeTemplateFromRootVolumeMsg msg, Map<String, Quota.QuotaPair> pairs) {
+                checkImageNumQuota(msg.getSession().getAccountUuid(),
+                        msg.getSession().getAccountUuid(),
+                        pairs);
+            }
+
+            private void check(APICreateDataVolumeTemplateFromVolumeMsg msg, Map<String, Quota.QuotaPair> pairs) {
+                checkImageNumQuota(msg.getSession().getAccountUuid(),
+                        msg.getSession().getAccountUuid(),
+                        pairs);
+            }
+
+            @Transactional(readOnly = true)
+            private void checkImageNumQuota(String currentAccountUuid,
+                                            String resourceTargetOwnerAccountUuid,
+                                            Map<String, Quota.QuotaPair> pairs) {
                 long imageNumQuota = pairs.get(ImageQuotaConstant.IMAGE_NUM).getValue();
                 long imageNumUsed = new ImageQuotaUtil().getUsedImageNum(resourceTargetOwnerAccountUuid);
                 long imageNumAsked = 1;
@@ -670,14 +707,16 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
                     quotaCompareInfo.request = imageNumAsked;
                     new QuotaUtil().CheckQuota(quotaCompareInfo);
                 }
-                new ImageQuotaUtil().checkImageSizeQuotaUseHttpHead(msg, pairs);
             }
         };
+
         Quota quota = new Quota();
         quota.setOperator(checker);
         quota.addMessageNeedValidation(APIAddImageMsg.class);
         quota.addMessageNeedValidation(APIRecoverImageMsg.class);
         quota.addMessageNeedValidation(APIChangeResourceOwnerMsg.class);
+        quota.addMessageNeedValidation(APICreateRootVolumeTemplateFromRootVolumeMsg.class);
+        quota.addMessageNeedValidation(APICreateDataVolumeTemplateFromVolumeMsg.class);
 
         Quota.QuotaPair p = new Quota.QuotaPair();
         p.setName(ImageQuotaConstant.IMAGE_NUM);
@@ -729,12 +768,22 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
                 new SQLBatch() {
                     @Override
                     protected void scripts() {
-                        sql(ImageVO.class)
-                                .eq(ImageVO_.uuid, imageUuid)
-                                .set(ImageVO_.status, ImageStatus.Ready)
-                                .set(ImageVO_.size, dr.getSize())
-                                .set(ImageVO_.actualSize, dr.getActualSize())
-                                .update();
+                        ImageVO vo = findByUuid(imageUuid, ImageVO.class);
+                        if (StringUtils.isNotEmpty(dr.getFormat())) {
+                            vo.setFormat(dr.getFormat());
+                        }
+                        if (vo.getFormat().equals(ImageConstant.ISO_FORMAT_STRING)
+                                && ImageMediaType.RootVolumeTemplate.equals(vo.getMediaType())) {
+                            vo.setMediaType(ImageMediaType.ISO);
+                        }
+                        if (ImageConstant.QCOW2_FORMAT_STRING.equals(vo.getFormat())
+                                && ImageMediaType.ISO.equals(vo.getMediaType())) {
+                            vo.setMediaType(ImageMediaType.RootVolumeTemplate);
+                        }
+                        vo.setStatus(ImageStatus.Ready);
+                        vo.setSize(dr.getSize());
+                        vo.setActualSize(dr.getActualSize());
+                        merge(vo);
                         sql(ImageBackupStorageRefVO.class)
                                 .eq(ImageBackupStorageRefVO_.backupStorageUuid, bsUuid)
                                 .eq(ImageBackupStorageRefVO_.imageUuid, imageUuid)
@@ -902,8 +951,8 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
         final ImageVO ivo = new SQLBatchWithReturn<ImageVO>() {
             @Override
             protected ImageVO scripts() {
+                vo.setAccountUuid(accountUuid);
                 final ImageVO ivo = factory.createImage(vo);
-                acntMgr.createAccountResourceRef(accountUuid, vo.getUuid(), ImageVO.class);
                 tagMgr.createTags(msgData.getSystemTags(), msgData.getUserTags(), vo.getUuid(), ImageVO.class.getSimpleName());
                 return ivo;
             }
@@ -1017,8 +1066,13 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
                                         if (StringUtils.isNotEmpty(re.getFormat())) {
                                             vo.setFormat(re.getFormat());
                                         }
-                                        if (vo.getFormat().equals(ImageConstant.ISO_FORMAT_STRING)) {
+                                        if (vo.getFormat().equals(ImageConstant.ISO_FORMAT_STRING)
+                                                && ImageMediaType.RootVolumeTemplate.equals(vo.getMediaType())) {
                                             vo.setMediaType(ImageMediaType.ISO);
+                                        }
+                                        if (ImageConstant.QCOW2_FORMAT_STRING.equals(vo.getFormat())
+                                                && ImageMediaType.ISO.equals(vo.getMediaType())) {
+                                            vo.setMediaType(ImageMediaType.RootVolumeTemplate);
                                         }
                                         dbf.update(vo);
                                     }
@@ -1190,8 +1244,8 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
                         imvo.setUrl(String.format("volume://%s", msgData.getRootVolumeUuid()));
                         imvo.setSize(volvo.getSize());
                         imvo.setActualSize(imageActualSize);
+                        imvo.setAccountUuid(accountUuid);
                         dbf.persist(imvo);
-                        acntMgr.createAccountResourceRef(accountUuid, imvo.getUuid(), ImageVO.class);
                         tagMgr.createTags(msgData.getNeedReplyMessage().getSystemTags(),msgData.getNeedReplyMessage().getUserTags(), imvo.getUuid(), ImageVO.class.getSimpleName());
 
                         imageVO = imvo;
@@ -1541,8 +1595,8 @@ public class ImageManagerImpl extends AbstractService implements ImageManager, M
                         vo.setSystem(false);
                         vo.setFormat(format);
                         vo.setUrl(String.format("volume://%s", msgData.getVolumeUuid()));
+                        vo.setAccountUuid(msgData.getSession().getAccountUuid());
                         image = dbf.persistAndRefresh(vo);
-                        acntMgr.createAccountResourceRef(msgData.getSession().getAccountUuid(), vo.getUuid(), ImageVO.class);
                         tagMgr.createTags(msgData.getSystemTags(), msgData.getUserTags(), vo.getUuid(), ImageVO.class.getSimpleName());
                         trigger.next();
                     }

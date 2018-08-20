@@ -10,14 +10,14 @@ import org.zstack.core.cloudbus.CloudBusListCallBack;
 import org.zstack.core.db.DatabaseFacade;
 import org.zstack.core.db.SQL;
 import org.zstack.core.errorcode.ErrorFacade;
-import org.zstack.core.inventory.InventoryFacade;
 import org.zstack.core.workflow.FlowChainBuilder;
 import org.zstack.header.apimediator.ApiMessageInterceptionException;
 import org.zstack.header.core.Completion;
 import org.zstack.header.core.workflow.*;
 import org.zstack.header.errorcode.ErrorCode;
 import org.zstack.header.exception.CloudRuntimeException;
-import org.zstack.header.host.*;
+import org.zstack.header.host.HostInventory;
+import org.zstack.header.host.HypervisorType;
 import org.zstack.header.identity.Quota;
 import org.zstack.header.identity.ReportQuotaExtensionPoint;
 import org.zstack.header.message.APIMessage;
@@ -51,8 +51,6 @@ public class VxlanNetwork extends L2NoVlanNetwork implements ReportQuotaExtensio
     protected DatabaseFacade dbf;
     @Autowired
     protected L2NetworkManager l2Mgr;
-    @Autowired
-    protected InventoryFacade inventoryMgr;
     @Autowired
     protected CascadeFacade casf;
     @Autowired
@@ -269,8 +267,8 @@ public class VxlanNetwork extends L2NoVlanNetwork implements ReportQuotaExtensio
 
             @Transactional(readOnly = true)
             private long getUsedVxlan(String accountUuid) {
-                long cnt = SQL.New("select count(vxlan) from VxlanNetworkVO vxlan, AccountResourceRefVO ref where vxlan.uuid = ref.resourceUuid and " +
-                        "ref.accountUuid = :auuid and ref.resourceType = :rtype", Long.class).param("auuid", accountUuid).param("rtype", VxlanNetworkVO.class.getSimpleName()).find();
+                long cnt = SQL.New("select count(vxlan) from L2NetworkVO vxlan, AccountResourceRefVO ref where vxlan.uuid = ref.resourceUuid and " +
+                        "ref.accountUuid = :auuid and vxlan.type = :rtype", Long.class).param("auuid", accountUuid).param("rtype", VxlanNetworkConstant.VXLAN_NETWORK_TYPE).find();
                 return cnt;
             }
 

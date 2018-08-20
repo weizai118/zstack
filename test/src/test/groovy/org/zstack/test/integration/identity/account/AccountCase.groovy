@@ -5,6 +5,7 @@ import org.zstack.core.config.GlobalConfig
 import org.zstack.core.db.Q
 import org.zstack.header.apimediator.ApiMessageInterceptionException
 import org.zstack.header.identity.AccountConstant
+import org.zstack.header.identity.AccountType
 import org.zstack.header.identity.AccountVO
 import org.zstack.header.identity.QuotaVO
 import org.zstack.header.identity.QuotaVO_
@@ -56,11 +57,92 @@ class AccountCase extends SubCase {
                 password = "password"
             } as AccountInventory
 
+            testNormalAccountQueryGlobalConfig()
+            testAdminUser()
             testLoginAsAdminAccountAndChangeSelfPassword()
             testLoginAsNormalAccountAndChangeSelfPassword()
             testNormalAccountCannotDeleteAnyAccount()
+            testAdminAccountDeleteSystemAdmin()
             testCreateAccount()
             testQuotaConfig()
+            testUserReadApi()
+        }
+    }
+
+    void testUserReadApi() {
+        def a = createAccount {
+            name = "test user api account"
+            password = "password"
+        }
+
+        def s = logInByAccount {
+            accountName = "test user api account"
+            password = "password"
+        }
+
+        def user = createUser {
+            name = "test user"
+            password = "password"
+            sessionId = s.uuid
+        }
+
+        def s2 = logInByUser {
+            accountName = "test user api account"
+            userName = "test user"
+            password = "password"
+        }
+
+        def list = queryZone {
+            sessionId = s2.uuid
+        }
+
+        assert !list.isEmpty()
+
+        expect(AssertionError.class) {
+            createZone {
+                name = "test"
+                sessionId = s2.uuid
+            }
+        }
+    }
+
+    void testNormalAccountQueryGlobalConfig() {
+        createAccount {
+            name = "accountQueryGlobalConfig"
+            password = "password"
+        }
+
+        SessionInventory s = logInByAccount {
+            accountName = "accountQueryGlobalConfig"
+            password = "password"
+        }
+
+        queryGlobalConfig {
+            conditions = []
+            sessionId = s.uuid
+        }
+    }
+
+    void testAdminUser() {
+        createUser {
+            name = "admin2"
+            password = "password"
+        }
+
+        SessionInventory s = logInByUser {
+            accountName = "admin"
+            userName = "admin2"
+            password = "password"
+        }
+
+        queryZone {
+            conditions = []
+            sessionId = s.uuid
+        }
+
+        queryGlobalConfig {
+            conditions = []
+            sessionId = s.uuid
         }
     }
 
@@ -164,6 +246,27 @@ class AccountCase extends SubCase {
             deleteAccount {
                 uuid = AccountConstant.INITIAL_SYSTEM_ADMIN_UUID
                 sessionId = adminSessionInv.uuid
+            }
+        }
+    }
+
+    void testAdminAccountDeleteSystemAdmin() {
+        def userpass = "password"
+        def newAdmin = createAccount {
+            name = "testAdmAccount"
+            password = userpass
+            type = AccountType.SystemAdmin.toString()
+        } as AccountInventory
+
+        SessionInventory adminSessionInv = logInByAccount {
+            accountName = newAdmin.name
+            password = userpass
+        } as SessionInventory
+
+        expect([ApiMessageInterceptionException.class, AssertionError.class]) {
+            deleteAccount {
+                sessionId = adminSessionInv.uuid
+                uuid = AccountConstant.INITIAL_SYSTEM_ADMIN_UUID
             }
         }
     }

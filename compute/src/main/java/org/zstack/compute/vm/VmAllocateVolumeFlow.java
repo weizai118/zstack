@@ -59,6 +59,7 @@ public class VmAllocateVolumeFlow implements Flow {
         for (VolumeSpec vspec : volumeSpecs) {
             CreateVolumeMsg msg = new CreateVolumeMsg();
             if (vspec.isRoot()) {
+            	msg.setResourceUuid((String) ctx.get("uuid"));
                 msg.setName("ROOT-for-" + spec.getVmInventory().getName());
                 msg.setDescription(String.format("Root volume for VM[uuid:%s]", spec.getVmInventory().getUuid()));
                 msg.setRootImageUuid(spec.getImageSpec().getInventory().getUuid());
@@ -103,6 +104,7 @@ public class VmAllocateVolumeFlow implements Flow {
                         VolumeInventory inv = cr.getInventory();
                         if (inv.getType().equals(VolumeType.Root.toString())) {
                             UpdateQuery.New(VmInstanceVO.class)
+                                    .isNull(VmInstanceVO_.rootVolumeUuid)
                                     .set(VmInstanceVO_.rootVolumeUuid, inv.getUuid())
                                     .condAnd(VmInstanceVO_.uuid, Op.EQ, spec.getVmInventory().getUuid())
                                     .update();

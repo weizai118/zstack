@@ -8,6 +8,7 @@ import org.zstack.header.core.workflow.Flow;
 import org.zstack.header.core.workflow.FlowRollback;
 import org.zstack.header.core.workflow.FlowTrigger;
 import org.zstack.header.host.HostInventory;
+import org.zstack.header.vm.MigrateVmMessage;
 import org.zstack.header.vm.VmInstanceConstant;
 import org.zstack.header.vm.VmInstanceMigrateExtensionPoint;
 import org.zstack.header.vm.VmInstanceSpec;
@@ -26,6 +27,13 @@ public class VmMigrateCallExtensionFlow implements Flow {
     @Override
     public void run(FlowTrigger trigger, Map data) {
         final VmInstanceSpec spec = (VmInstanceSpec) data.get(VmInstanceConstant.Params.VmInstanceSpec.toString());
+
+        boolean migrateFromDest = false;
+        if (spec.getMessage() instanceof MigrateVmMessage) {
+            migrateFromDest = ((MigrateVmMessage)spec.getMessage()).isMigrateFromDestination();
+        }
+
+        final boolean fromDest = migrateFromDest;
 
         final HostInventory destHost = spec.getDestHost();
         for (VmInstanceMigrateExtensionPoint ext : pluginRgty.getExtensionList(VmInstanceMigrateExtensionPoint.class)) {

@@ -3,13 +3,17 @@ package org.zstack.storage.volume;
 import org.springframework.beans.factory.annotation.Autowire;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Configurable;
+import org.springframework.security.access.method.P;
 import org.springframework.transaction.annotation.Transactional;
+import org.zstack.core.asyncbatch.While;
 import org.zstack.core.cascade.CascadeConstant;
 import org.zstack.core.cascade.CascadeFacade;
 import org.zstack.core.cloudbus.CloudBus;
 import org.zstack.core.cloudbus.CloudBusCallBack;
 import org.zstack.core.componentloader.PluginRegistry;
-import org.zstack.core.db.*;
+import org.zstack.core.db.DatabaseFacade;
+import org.zstack.core.db.SQL;
+import org.zstack.core.db.SimpleQuery;
 import org.zstack.core.db.SimpleQuery.Op;
 import org.zstack.core.defer.Defer;
 import org.zstack.core.defer.Deferred;
@@ -25,6 +29,7 @@ import org.zstack.header.core.NopeCompletion;
 import org.zstack.header.core.ReturnValueCompletion;
 import org.zstack.header.core.workflow.*;
 import org.zstack.header.errorcode.ErrorCode;
+import org.zstack.header.errorcode.ErrorCodeList;
 import org.zstack.header.errorcode.OperationFailureException;
 import org.zstack.header.errorcode.SysErrors;
 import org.zstack.header.exception.CloudRuntimeException;
@@ -208,6 +213,15 @@ public class VolumeBase implements Volume {
 
     private void doInstantiateVolume(InstantiateVolumeMsg msg, NoErrorCompletion completion) {
         InstantiateVolumeReply reply = new InstantiateVolumeReply();
+
+        // InstantiateVolumeMsg is queued, but we need to check whether the volume has been instantiated
+        self = dbf.reload(self);
+        if (self.getStatus() == VolumeStatus.Ready) {
+            reply.setVolume(getSelfInventory());
+            bus.reply(msg, reply);
+            completion.done();
+            return;
+        }
 
         List<PreInstantiateVolumeExtensionPoint> exts = pluginRgty.getExtensionList(PreInstantiateVolumeExtensionPoint.class);
         for (PreInstantiateVolumeExtensionPoint ext : exts) {
@@ -703,6 +717,11 @@ public class VolumeBase implements Volume {
                             bus.send(dmsg, new CloudBusCallBack(trigger) {
                                 @Override
                                 public void run(MessageReply reply) {
+                                    if (!reply.isSuccess()) {
+                                        trigger.fail(reply.getError());
+                                        return;
+                                    }
+
                                     self.setVmInstanceUuid(null);
                                     self = dbf.updateAndRefresh(self);
                                     trigger.next();
@@ -764,38 +783,52 @@ public class VolumeBase implements Volume {
                 done(new FlowDoneHandler(msg) {
                     @Override
                     public void handle(Map data) {
-                        VolumeStatus oldStatus = self.getStatus();
+                        ErrorCodeList errList = new ErrorCodeList();
+                        new While<>(pluginRgty.getExtensionList(VolumeDeletionExtensionPoint.class)).
+                                all((ext, c) -> ext.afterDeleteVolume(getSelfInventory(), new Completion(c) {
+                                    @Override
+                                    public void success() {
+                                        c.done();
+                                    }
 
-                        if (deletionPolicy == VolumeDeletionPolicy.Direct) {
-                            self.setStatus(VolumeStatus.Deleted);
-                            self = dbf.updateAndRefresh(self);
-                            new FireVolumeCanonicalEvent().fireVolumeStatusChangedEvent(oldStatus, getSelfInventory());
-                            dbf.remove(self);
-                        } else if (deletionPolicy == VolumeDeletionPolicy.Delay) {
-                            self.setStatus(VolumeStatus.Deleted);
-                            self = dbf.updateAndRefresh(self);
-                            new FireVolumeCanonicalEvent().fireVolumeStatusChangedEvent(oldStatus, getSelfInventory());
-                        } else if (deletionPolicy == VolumeDeletionPolicy.Never) {
-                            self.setStatus(VolumeStatus.Deleted);
-                            self = dbf.updateAndRefresh(self);
-                            new FireVolumeCanonicalEvent().fireVolumeStatusChangedEvent(oldStatus, getSelfInventory());
-                        } else if (deletionPolicy == VolumeDeletionPolicy.DBOnly) {
-                            VolumeInventory inventory = getSelfInventory();
-                            inventory.setStatus(VolumeStatus.Deleted.toString());
-                            new FireVolumeCanonicalEvent().fireVolumeStatusChangedEvent(oldStatus, inventory);
-                            dbf.remove(self);
-                        } else {
-                            throw new CloudRuntimeException(String.format("Invalid deletionPolicy:%s", deletionPolicy));
-                        }
-
-
-                        CollectionUtils.safeForEach(pluginRgty.getExtensionList(VolumeDeletionExtensionPoint.class), new ForEachFunction<VolumeDeletionExtensionPoint>() {
+                                    @Override
+                                    public void fail(ErrorCode errorCode) {
+                                        errList.getCauses().add(errorCode);
+                                        c.done();
+                                    }
+                                })).run(new NoErrorCompletion(completion) {
                             @Override
-                            public void run(VolumeDeletionExtensionPoint arg) {
-                                arg.afterDeleteVolume(getSelfInventory());
+                            public void done() {
+                                if (errList.getCauses().size() > 0) {
+                                    reply.setError(errList.getCauses().get(0));
+                                } else {
+                                    VolumeStatus oldStatus = self.getStatus();
+
+                                    if (deletionPolicy == VolumeDeletionPolicy.Direct) {
+                                        self.setStatus(VolumeStatus.Deleted);
+                                        self = dbf.updateAndRefresh(self);
+                                        new FireVolumeCanonicalEvent().fireVolumeStatusChangedEvent(oldStatus, getSelfInventory());
+                                        dbf.remove(self);
+                                    } else if (deletionPolicy == VolumeDeletionPolicy.Delay) {
+                                        self.setStatus(VolumeStatus.Deleted);
+                                        self = dbf.updateAndRefresh(self);
+                                        new FireVolumeCanonicalEvent().fireVolumeStatusChangedEvent(oldStatus, getSelfInventory());
+                                    } else if (deletionPolicy == VolumeDeletionPolicy.Never) {
+                                        self.setStatus(VolumeStatus.Deleted);
+                                        self = dbf.updateAndRefresh(self);
+                                        new FireVolumeCanonicalEvent().fireVolumeStatusChangedEvent(oldStatus, getSelfInventory());
+                                    } else if (deletionPolicy == VolumeDeletionPolicy.DBOnly) {
+                                        VolumeInventory inventory = getSelfInventory();
+                                        inventory.setStatus(VolumeStatus.Deleted.toString());
+                                        new FireVolumeCanonicalEvent().fireVolumeStatusChangedEvent(oldStatus, inventory);
+                                        dbf.remove(self);
+                                    } else {
+                                        throw new CloudRuntimeException(String.format("Invalid deletionPolicy:%s", deletionPolicy));
+                                    }
+                                }
+                                bus.reply(msg, reply);
                             }
                         });
-                        bus.reply(msg, reply);
                     }
                 });
 
@@ -1008,9 +1041,14 @@ public class VolumeBase implements Volume {
     protected void recoverVolume(Completion completion) {
         final VolumeInventory vol = getSelfInventory();
         List<RecoverDataVolumeExtensionPoint> exts = pluginRgty.getExtensionList(RecoverDataVolumeExtensionPoint.class);
-        for (RecoverDataVolumeExtensionPoint ext : exts) {
-            ext.preRecoverDataVolume(vol);
-        }
+
+        CollectionUtils.safeForEach(exts, new ForEachFunction<RecoverDataVolumeExtensionPoint>() {
+            @Override
+            public void run(RecoverDataVolumeExtensionPoint ext) {
+                ext.preRecoverDataVolume(vol);
+            }
+        });
+
 
         CollectionUtils.safeForEach(exts, new ForEachFunction<RecoverDataVolumeExtensionPoint>() {
             @Override
@@ -1036,7 +1074,6 @@ public class VolumeBase implements Volume {
                 ext.afterRecoverDataVolume(vol);
             }
         });
-
         completion.success();
     }
 

@@ -5,10 +5,12 @@ import org.springframework.transaction.annotation.Transactional;
 import org.zstack.core.CoreGlobalProperty;
 import org.zstack.core.Platform;
 import org.zstack.core.ansible.AnsibleFacade;
+import org.zstack.core.asyncbatch.While;
 import org.zstack.core.cloudbus.CloudBus;
 import org.zstack.core.cloudbus.CloudBusCallBack;
 import org.zstack.core.componentloader.PluginRegistry;
 import org.zstack.core.db.DatabaseFacade;
+import org.zstack.core.db.Q;
 import org.zstack.core.db.SQLBatch;
 import org.zstack.core.db.SimpleQuery;
 import org.zstack.core.db.SimpleQuery.Op;
@@ -16,22 +18,20 @@ import org.zstack.core.errorcode.ErrorFacade;
 import org.zstack.core.thread.ThreadFacade;
 import org.zstack.header.Component;
 import org.zstack.header.core.Completion;
+import org.zstack.header.core.NoErrorCompletion;
 import org.zstack.header.core.progress.TaskProgressRange;
 import org.zstack.header.core.workflow.*;
 import org.zstack.header.errorcode.ErrorCode;
+import org.zstack.header.errorcode.ErrorCodeList;
 import org.zstack.header.errorcode.OperationFailureException;
 import org.zstack.header.exception.CloudRuntimeException;
 import org.zstack.header.message.MessageReply;
 import org.zstack.header.storage.backup.*;
 import org.zstack.header.storage.primary.*;
-import org.zstack.header.storage.snapshot.CreateTemplateFromVolumeSnapshotExtensionPoint;
-import org.zstack.header.storage.snapshot.VolumeSnapshotInventory;
+import org.zstack.header.storage.snapshot.*;
 import org.zstack.header.vm.VmInstanceInventory;
 import org.zstack.header.vm.VmInstanceSpec;
-import org.zstack.header.volume.SyncVolumeSizeMsg;
-import org.zstack.header.volume.SyncVolumeSizeReply;
-import org.zstack.header.volume.VolumeConstant;
-import org.zstack.header.volume.VolumeInventory;
+import org.zstack.header.volume.*;
 import org.zstack.kvm.KVMAgentCommands.*;
 import org.zstack.kvm.*;
 import org.zstack.storage.ceph.*;
@@ -65,7 +65,8 @@ import static org.zstack.utils.CollectionDSL.map;
  */
 public class CephPrimaryStorageFactory implements PrimaryStorageFactory, CephCapacityUpdateExtensionPoint, KVMStartVmExtensionPoint,
         KVMAttachVolumeExtensionPoint, KVMDetachVolumeExtensionPoint, CreateTemplateFromVolumeSnapshotExtensionPoint,
-        KvmSetupSelfFencerExtensionPoint, KVMPreAttachIsoExtensionPoint, Component, PostMarkRootVolumeAsSnapshotExtension {
+        KvmSetupSelfFencerExtensionPoint, KVMPreAttachIsoExtensionPoint, Component, PostMarkRootVolumeAsSnapshotExtension,
+        BeforeTakeLiveSnapshotsOnVolumes {
     private static final CLogger logger = Utils.getLogger(CephPrimaryStorageFactory.class);
 
     public static final PrimaryStorageType type = new PrimaryStorageType(CephConstants.CEPH_PRIMARY_STORAGE_TYPE);
@@ -376,7 +377,7 @@ public class CephPrimaryStorageFactory implements PrimaryStorageFactory, CephCap
     }
 
     @Override
-    public void beforeAttachVolume(KVMHostInventory host, VmInstanceInventory vm, VolumeInventory volume, AttachDataVolumeCmd cmd) {
+    public void beforeAttachVolume(KVMHostInventory host, VmInstanceInventory vm, VolumeInventory volume, AttachDataVolumeCmd cmd, Map data) {
         cmd.setVolume(convertVolumeToCephIfNeeded(volume, cmd.getVolume()));
     }
 
@@ -386,7 +387,7 @@ public class CephPrimaryStorageFactory implements PrimaryStorageFactory, CephCap
     }
 
     @Override
-    public void attachVolumeFailed(KVMHostInventory host, VmInstanceInventory vm, VolumeInventory volume, AttachDataVolumeCmd cmd, ErrorCode err) {
+    public void attachVolumeFailed(KVMHostInventory host, VmInstanceInventory vm, VolumeInventory volume, AttachDataVolumeCmd cmd, ErrorCode err, Map data) {
 
     }
 
@@ -608,5 +609,92 @@ public class CephPrimaryStorageFactory implements PrimaryStorageFactory, CephCap
     @Override
     public void afterMarkRootVolumeAsSnapshot(VolumeSnapshotInventory snapshot) {
 
+    }
+
+    @Override
+    public void beforeTakeLiveSnapshotsOnVolumes(CreateVolumesSnapshotOverlayInnerMsg msg, Map flowData, Completion completion) {
+        Integer isCephPs = 0;
+        for (CreateVolumesSnapshotsJobStruct struct : msg.getVolumeSnapshotJobs()) {
+            if (Q.New(CephPrimaryStorageVO.class)
+                    .eq(CephPrimaryStorageVO_.uuid, struct.getPrimaryStorageUuid())
+                    .isExists()) {
+                isCephPs += 1;
+            }
+        }
+
+        if (isCephPs.equals(0)) {
+            completion.success();
+            return;
+        }
+
+        if (isCephPs < msg.getVolumeSnapshotJobs().size()) {
+            throw new OperationFailureException(operr("not support take volumes snapshots " +
+                    "on multiple ps when including ceph"));
+        }
+
+        logger.info(String.format("take snapshots for volumes[%s] on %s",
+                msg.getLockedVolumeUuids(), getClass().getCanonicalName()));
+
+        flowData.put(VolumeSnapshotConstant.NEED_BLOCK_STREAM_ON_HYPERVISOR, false);
+        flowData.put(VolumeSnapshotConstant.NEED_TAKE_SNAPSHOTS_ON_HYPERVISOR, false);
+
+        ErrorCodeList errList = new ErrorCodeList();
+        new While<>(msg.getVolumeSnapshotJobs()).all((struct, whileCompletion) -> {
+            VolumeSnapshotVO vo = Q.New(VolumeSnapshotVO.class).eq(VolumeSnapshotVO_.uuid, struct.getResourceUuid()).find();
+            if (vo.getStatus().equals(VolumeSnapshotStatus.Ready)) {
+                logger.warn(String.format("snapshot %s on volume %s is ready, no need to create again!",
+                        vo.getUuid(), vo.getVolumeUuid()));
+                whileCompletion.done();
+                return;
+            }
+            TakeSnapshotMsg tmsg = new TakeSnapshotMsg();
+            tmsg.setPrimaryStorageUuid(struct.getPrimaryStorageUuid());
+            tmsg.setStruct(struct.getVolumeSnapshotStruct());
+            bus.makeTargetServiceIdByResourceUuid(tmsg, PrimaryStorageConstant.SERVICE_ID, tmsg.getPrimaryStorageUuid());
+            bus.send(tmsg, new CloudBusCallBack(msg) {
+                @Override
+                public void run(MessageReply reply) {
+                    if (!reply.isSuccess()) {
+                        errList.getCauses().add(reply.getError());
+                        whileCompletion.done();
+                        return;
+                    }
+                    TakeSnapshotReply treply = reply.castReply();
+                    if (!treply.isSuccess()) {
+                        errList.getCauses().add(reply.getError());
+                        whileCompletion.done();
+                        return;
+                    }
+
+                    vo.setPrimaryStorageInstallPath(treply.getInventory().getPrimaryStorageInstallPath());
+                    vo.setSize(treply.getInventory().getSize());
+                    vo.setPrimaryStorageUuid(treply.getInventory().getPrimaryStorageUuid());
+                    vo.setType(treply.getInventory().getType());
+                    vo.setFormat(treply.getInventory().getFormat());
+                    vo.setStatus(VolumeSnapshotStatus.Ready);
+                    dbf.update(vo);
+
+                    struct.getVolumeSnapshotStruct().setCurrent(treply.getInventory());
+                    whileCompletion.done();
+                }
+            });
+        }).run(new NoErrorCompletion() {
+            @Override
+            public void done() {
+                if (!errList.getCauses().isEmpty()) {
+                    completion.fail(errList.getCauses().get(0));
+                    return;
+                }
+                completion.success();
+            }
+        });
+    }
+
+    private Boolean isCephPrimaryStorageVolume(String volumeUuid) {
+        VolumeVO volumeVO = Q.New(VolumeVO.class).eq(VolumeVO_.uuid, volumeUuid).find();
+        PrimaryStorageVO primaryStorageVO = Q.New(PrimaryStorageVO.class)
+                .eq(PrimaryStorageVO_.uuid, volumeVO.getPrimaryStorageUuid()).find();
+
+        return primaryStorageVO.getType().equals(type.toString());
     }
 }

@@ -311,7 +311,7 @@ public class ZSClient {
                     urlBuilder.addQueryParameter("sort", String.format("%s", qaction.sortBy));
                 } else {
                     String d = "asc".equals(qaction.sortDirection) ? "+" : "-";
-                    urlBuilder.addQueryParameter("sort", String.format("%s%s", d, qaction.replyWithCount));
+                    urlBuilder.addQueryParameter("sort", String.format("%s%s", d, qaction.sortBy));
                 }
             }
             if (qaction.fields != null && !qaction.fields.isEmpty()) {
@@ -432,6 +432,12 @@ public class ZSClient {
             if (pollingUrl == null) {
                 throw new ApiException(String.format("Internal Error] the api[%s] is an async API but the server" +
                         " doesn't return the polling location url", action.getClass().getSimpleName()));
+            }
+
+            String configHost = String.format("%s:%s", config.getHostname(), config.getPort());
+            if (!pollingUrl.contains(configHost)) {
+                String splitRegex = "/zstack/v1/api-jobs";
+                pollingUrl = String.format("http://%s%s%s", configHost, splitRegex ,pollingUrl.split(splitRegex)[1]);
             }
 
             if (completion == null) {

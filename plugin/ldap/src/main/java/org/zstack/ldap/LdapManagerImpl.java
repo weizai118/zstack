@@ -13,13 +13,17 @@ import org.springframework.orm.jpa.JpaSystemException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.transaction.annotation.Transactional;
 import org.zstack.core.Platform;
+import org.zstack.header.core.captcha.Captcha;
 import org.zstack.core.cloudbus.CloudBus;
 import org.zstack.core.cloudbus.MessageSafe;
+import org.zstack.core.componentloader.PluginRegistry;
 import org.zstack.core.db.DatabaseFacade;
 import org.zstack.core.db.Q;
+import org.zstack.core.db.SQLBatch;
 import org.zstack.core.db.SimpleQuery;
 import org.zstack.core.errorcode.ErrorFacade;
 import org.zstack.header.AbstractService;
+import org.zstack.header.core.NoErrorCompletion;
 import org.zstack.header.errorcode.OperationFailureException;
 import org.zstack.header.exception.CloudRuntimeException;
 import org.zstack.header.identity.*;
@@ -61,6 +65,10 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
     private CloudBus bus;
     @Autowired
     private ErrorFacade errf;
+    @Autowired
+    private PluginRegistry pluginRgty;
+    @Autowired
+    private Captcha captcha;
 
 
     @Transactional(readOnly = true)
@@ -76,7 +84,7 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
         return ldapServers.get(0);
     }
 
-    private LdapTemplateContextSource readLdapServerConfiguration() {
+    protected LdapTemplateContextSource readLdapServerConfiguration() {
         LdapServerVO ldapServerVO = getLdapServer();
         LdapServerInventory ldapServerInventory = LdapServerInventory.valueOf(ldapServerVO);
         return new LdapUtil().loadLdap(ldapServerInventory);
@@ -131,6 +139,7 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
             if (fullUserDn.equals("") || password.equals("")) {
                 return false;
             }
+
             LdapServerVO ldapServerVO = getLdapServer();
             LdapServerInventory ldapServerInventory = LdapServerInventory.valueOf(ldapServerVO);
             ldapServerInventory.setUsername(fullUserDn);
@@ -152,6 +161,24 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
         }
     }
 
+    @Override
+    public String getFullUserDn(String uid) {
+        LdapTemplateContextSource ldapTemplateContextSource = readLdapServerConfiguration();
+        String ldapUseAsLoginName = LdapUtil.getLdapUseAsLoginName();
+        String fullUserDn = null;
+        try {
+            fullUserDn = getFullUserDn(ldapTemplateContextSource.getLdapTemplate(), ldapUseAsLoginName, uid);
+
+            if (fullUserDn.equals("")) {
+                return null;
+            }
+        } catch (Exception e) {
+            logger.debug(String.format("Get user dn of uid[%s] failed ", uid));
+        }
+
+        return fullUserDn;
+    }
+
     @Transactional
     private LdapAccountRefInventory bindLdapAccount(String accountUuid, String ldapUid) {
         LdapAccountRefVO ref = new LdapAccountRefVO();
@@ -168,7 +195,7 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
                 replace("," + ldapTemplateContextSource.getLdapContextSource().getBaseLdapPathAsString(), "");
     }
 
-    private String getFullUserDn(LdapTemplate ldapTemplate, String key, String val) {
+    public String getFullUserDn(LdapTemplate ldapTemplate, String key, String val) {
         EqualsFilter f = new EqualsFilter(key, val);
         return getFullUserDn(ldapTemplate, f.toString());
     }
@@ -282,6 +309,7 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
         }
     }
 
+    @Override
     public LdapAccountRefVO findLdapAccountRefVO(String ldapDn){
 
         LdapAccountRefVO ldapAccountRefVO = Q.New(LdapAccountRefVO.class)
@@ -347,11 +375,14 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
         if (!isValid(ldapLoginName, msg.getPassword())) {
             reply.setError(errf.instantiateErrorCode(IdentityErrors.AUTHENTICATION_ERROR,
                     "Login validation failed in LDAP"));
+            bus.reply(msg, reply);
+            return;
         }
 
         LdapTemplateContextSource ldapTemplateContextSource = readLdapServerConfiguration();
         String dn = getFullUserDn(ldapTemplateContextSource.getLdapTemplate(), LdapUtil.getLdapUseAsLoginName(), ldapLoginName);
         LdapAccountRefVO vo = findLdapAccountRefVO(dn);
+
         if (vo == null) {
             reply.setError(errf.instantiateErrorCode(IdentityErrors.AUTHENTICATION_ERROR,
                     "The ldapUid does not have a binding account."));
@@ -359,14 +390,14 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
             return;
         }
 
-        reply.setInventory(getSession(vo.getAccountUuid(), vo.getAccountUuid()));
-
         SimpleQuery<AccountVO> sq = dbf.createQuery(AccountVO.class);
         sq.add(AccountVO_.uuid, SimpleQuery.Op.EQ, vo.getAccountUuid());
         AccountVO avo = sq.find();
         if (avo == null) {
             throw new CloudRuntimeException(String.format("Account[uuid:%s] Not Found!!!", vo.getAccountUuid()));
         }
+
+        reply.setInventory(getSession(vo.getAccountUuid(), vo.getAccountUuid()));
         reply.setAccountInventory(AccountInventory.valueOf(avo));
 
         bus.reply(msg, reply);
@@ -466,7 +497,18 @@ public class LdapManagerImpl extends AbstractService implements LdapManager {
     private void handle(APIDeleteLdapServerMsg msg) {
         APIDeleteLdapServerEvent evt = new APIDeleteLdapServerEvent(msg.getId());
 
-        dbf.removeByPrimaryKey(msg.getUuid(), LdapServerVO.class);
+        new SQLBatch() {
+            @Override
+            protected void scripts() {
+                if (!q(LdapServerVO.class).eq(LdapServerVO_.uuid, msg.getUuid()).isExists()) {
+                    return;
+                }
+
+                LdapServerVO vo = q(LdapServerVO.class).eq(LdapServerVO_.uuid, msg.getUuid()).find();
+                remove(vo);
+                flush();
+            }
+        }.execute();
 
         bus.publish(evt);
     }

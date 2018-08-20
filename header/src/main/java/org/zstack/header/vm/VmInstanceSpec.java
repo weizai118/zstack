@@ -180,6 +180,7 @@ public class VmInstanceSpec implements Serializable {
     private String requiredPrimaryStorageUuidForDataVolume;
 
     private List<HostName> hostnames = new ArrayList<>();
+    private HostInventory srcHost;
     private HostInventory destHost;
     private List<VmNicInventory> destNics = new ArrayList<>();
     private List<VolumeInventory> destDataVolumes = new ArrayList<>();
@@ -189,17 +190,19 @@ public class VmInstanceSpec implements Serializable {
     private Map<String, JsonWrapper> extensionData = new HashMap<>();
     private String dataIsoPath;
     private List<IsoSpec> destIsoList = new ArrayList<>();
-    private String userdata;
+    private List<String> userdataList;
     private List<String> bootOrders;
     private boolean gcOnStopFailure;
+    private boolean ignoreResourceReleaseFailure;
     private String usbRedirect = "false";
     private String enableRDP = "false";
     private String VDIMonitorNumber = "1";
     private String consolePassword;
     private VmAccountPreference accountPerference;
+    private boolean createPaused;
 
     public String getVDIMonitorNumber() {
-        return VDIMonitorNumber;
+        return VDIMonitorNumber == null ? "1" : VDIMonitorNumber;
     }
 
     public void setVDIMonitorNumber(String VDIMonitorNumber) {
@@ -220,6 +223,14 @@ public class VmInstanceSpec implements Serializable {
 
     public void setUsbRedirect(String usbRedirect) {
         this.usbRedirect = usbRedirect;
+    }
+
+    public void setCreatePaused(boolean createPaused) {
+        this.createPaused = createPaused;
+    }
+
+    public boolean isCreatePaused() {
+        return createPaused;
     }
 
     public VmAccountPreference getAccountPerference() {
@@ -278,12 +289,12 @@ public class VmInstanceSpec implements Serializable {
         this.consolePassword = consolePassword;
     }
 
-    public String getUserdata() {
-        return userdata;
+    public List<String> getUserdataList() {
+        return userdataList;
     }
 
-    public void setUserdata(String userdata) {
-        this.userdata = userdata;
+    public void setUserdataList(List<String> userdataList) {
+        this.userdataList = userdataList;
     }
 
     public List<IsoSpec> getDestIsoList() {
@@ -446,9 +457,7 @@ public class VmInstanceSpec implements Serializable {
         List<String> nsTypes = new ArrayList<>();
         if (getL3Networks() != null) {
             for (L3NetworkInventory l3 : getL3Networks()) {
-                for (NetworkServiceL3NetworkRefInventory ref : l3.getNetworkServices()) {
-                    nsTypes.add(ref.getNetworkServiceType());
-                }
+                nsTypes.addAll(l3.getNetworkServiceTypes());
             }
         }
         return nsTypes;
@@ -468,5 +477,21 @@ public class VmInstanceSpec implements Serializable {
 
     public void setRequiredPrimaryStorageUuidForDataVolume(String requiredPrimaryStorageUuidForDataVolume) {
         this.requiredPrimaryStorageUuidForDataVolume = requiredPrimaryStorageUuidForDataVolume;
+    }
+
+    public HostInventory getSrcHost() {
+        return srcHost;
+    }
+
+    public void setSrcHost(HostInventory srcHost) {
+        this.srcHost = srcHost;
+    }
+
+    public boolean ignoreResourceReleaseFailure() {
+        return ignoreResourceReleaseFailure;
+    }
+
+    public void setIgnoreResourceReleaseFailure(boolean ignoreResourceReleaseFailure) {
+        this.ignoreResourceReleaseFailure = ignoreResourceReleaseFailure;
     }
 }

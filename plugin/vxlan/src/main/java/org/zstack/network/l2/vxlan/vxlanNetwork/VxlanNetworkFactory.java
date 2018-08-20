@@ -27,10 +27,8 @@ import org.zstack.header.vm.VmInstanceMigrateExtensionPoint;
 import org.zstack.header.vm.VmNicInventory;
 import org.zstack.identity.AccountManager;
 import org.zstack.network.l2.L2NetworkDefaultMtu;
-import org.zstack.network.l2.L2VlanNetwork;
 import org.zstack.network.l2.vxlan.vxlanNetworkPool.AllocateVniMsg;
 import org.zstack.network.l2.vxlan.vxlanNetworkPool.AllocateVniReply;
-import org.zstack.network.l2.vxlan.vxlanNetworkPool.VxlanNetworkPool;
 import org.zstack.network.service.NetworkServiceGlobalConfig;
 import org.zstack.query.QueryFacade;
 import org.zstack.utils.Utils;
@@ -48,7 +46,7 @@ import static org.zstack.core.Platform.operr;
  */
 public class VxlanNetworkFactory implements L2NetworkFactory, Component, VmInstanceMigrateExtensionPoint, L2NetworkDefaultMtu, L2NetworkGetVniExtensionPoint {
     private static CLogger logger = Utils.getLogger(VxlanNetworkFactory.class);
-    static L2NetworkType type = new L2NetworkType(VxlanNetworkConstant.VXLAN_NETWORK_TYPE);
+    public static L2NetworkType type = new L2NetworkType(VxlanNetworkConstant.VXLAN_NETWORK_TYPE);
 
     @Autowired
     private DatabaseFacade dbf;
@@ -85,6 +83,7 @@ public class VxlanNetworkFactory implements L2NetworkFactory, Component, VmInsta
                 String uuid = msg.getResourceUuid() == null ? Platform.getUuid() : msg.getResourceUuid();
                 vo.setUuid(uuid);
                 vo.setVni(r.getVni());
+                vo.setAccountUuid(msg.getSession().getAccountUuid());
                 vo.setPoolUuid((amsg.getPoolUuid()));
                 if (vo.getPhysicalInterface() == null) {
                     vo.setPhysicalInterface("");
@@ -102,8 +101,6 @@ public class VxlanNetworkFactory implements L2NetworkFactory, Component, VmInsta
                     dbf.getEntityManager().flush();
                     dbf.getEntityManager().refresh(rvo);
                 }
-
-                acntMgr.createAccountResourceRef(msg.getSession().getAccountUuid(), vo.getUuid(), VxlanNetworkVO.class);
 
                 dbf.getEntityManager().flush();
                 dbf.getEntityManager().refresh(vo);
@@ -211,7 +208,7 @@ public class VxlanNetworkFactory implements L2NetworkFactory, Component, VmInsta
 
     @Override
     public Integer getDefaultMtu() {
-        return Integer.valueOf(NetworkServiceGlobalConfig.DHCP_MTU_VXLAN.getDefaultValue());
+        return Integer.valueOf(NetworkServiceGlobalConfig.DHCP_MTU_VXLAN.value());
     }
 
     @Override

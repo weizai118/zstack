@@ -79,7 +79,7 @@ public class KvmBackend extends HypervisorBackend {
     public KvmBackend() {
     }
 
-    public static class AgentCmd {
+    public static class AgentCmd extends KVMAgentCommands.AgentCommand {
         public String mountPoint;
     }
 
@@ -128,6 +128,10 @@ public class KvmBackend extends HypervisorBackend {
         public String volumePath;
     }
 
+    @ApiTimeout(apiClasses = {
+            APICreateRootVolumeTemplateFromVolumeSnapshotMsg.class,
+            APICreateRootVolumeTemplateFromRootVolumeMsg.class,
+    })
     public static class SftpUploadBitsCmd extends AgentCmd implements HasThreadContext{
         public String primaryStorageInstallPath;
         public String backupStorageInstallPath;
@@ -182,7 +186,7 @@ public class KvmBackend extends HypervisorBackend {
     }
 
     @ApiTimeout(apiClasses = {APICreateDataVolumeFromVolumeSnapshotMsg.class, APIDeleteVolumeSnapshotMsg.class})
-    public static class OfflineMergeSnapshotCmd extends AgentCmd {
+    public static class OfflineMergeSnapshotCmd extends AgentCmd implements HasThreadContext {
         public String srcPath;
         public String destPath;
         public boolean fullRebase;
@@ -375,6 +379,17 @@ public class KvmBackend extends HypervisorBackend {
         }
         File volDir = new File(volPath).getParentFile();
         return PathUtil.join(volDir.getAbsolutePath(), "snapshots", String.format("%s.qcow2", snapshot.getUuid()));
+    }
+
+    public String makeSnapshotInstallPath(VolumeInventory vol, String snapshotUuid) {
+        String volPath;
+        if (VolumeType.Data.toString().equals(vol.getType())) {
+            volPath = makeDataVolumeInstallUrl(vol.getUuid());
+        } else {
+            volPath = makeRootVolumeInstallUrl(vol);
+        }
+        File volDir = new File(volPath).getParentFile();
+        return PathUtil.join(volDir.getAbsolutePath(), "snapshots", String.format("%s.qcow2", snapshotUuid));
     }
 
     public String makeSnapshotWorkspacePath(String imageUuid) {
@@ -1298,7 +1313,7 @@ public class KvmBackend extends HypervisorBackend {
     }
 
     @Override
-    void handle(UploadBitsToBackupStorageMsg msg, final ReturnValueCompletion<UploadBitsToBackupStorageReply> completion) {
+    public void handle(UploadBitsToBackupStorageMsg msg, final ReturnValueCompletion<UploadBitsToBackupStorageReply> completion) {
         SftpBackupStorageKvmUploader uploader = new SftpBackupStorageKvmUploader(msg.getBackupStorageUuid());
         uploader.uploadBits(null, msg.getBackupStorageInstallPath(), msg.getPrimaryStorageInstallPath(), new ReturnValueCompletion<String>(completion) {
             @Override
@@ -1660,5 +1675,12 @@ public class KvmBackend extends HypervisorBackend {
                 bus.reply(msg, reply);
             }
         });
+    }
+
+    @Override
+    public void handle(AskInstallPathForNewSnapshotMsg msg, ReturnValueCompletion<AskInstallPathForNewSnapshotReply> completion) {
+        AskInstallPathForNewSnapshotReply reply = new AskInstallPathForNewSnapshotReply();
+        reply.setSnapshotInstallPath(makeSnapshotInstallPath(msg.getVolumeInventory(), msg.getSnapshotUuid()));
+        completion.success(reply);
     }
 }

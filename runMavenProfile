@@ -78,7 +78,7 @@ docpremium() {
     else
         cd test
     fi
-    mvn test -Dtest=TestGenerateDocTemplate
+    mvn test -Dtest=TestGenerateDocTemplate -Drepair=true
     cd - > /dev/null
 }
 
@@ -160,6 +160,19 @@ triggerexpression() {
    cd - > /dev/null
 }
 
+zql() {
+   cd search
+   mvn -P zql generate-sources
+   if [ $? -ne 0 ]; then
+	exit 1
+   fi
+   mkdir -p src/main/java/org/zstack/zql/antlr4/
+   yes | cp target/generated-sources/antlr4/* src/main/java/org/zstack/zql/antlr4/
+   rm -f target/generated-sources/antlr4/*
+   mvn -Dmaven.test.skip=true clean install
+   cd - > /dev/null
+}
+
 cloudwatchfunction() {
    if [ ! -d premium/zwatch ]; then
 	echo "this command needs premium source code"
@@ -171,6 +184,20 @@ cloudwatchfunction() {
    mkdir -p src/main/java/org/zstack/zwatch/api/antlr4/
    yes | cp target/generated-sources/antlr4/MetricFunction* src/main/java/org/zstack/zwatch/api/antlr4/
    rm -f target/generated-sources/antlr4/MetricFunction*
+   cd - > /dev/null
+}
+
+zwatchzql() {
+   if [ ! -d premium/zwatch ]; then
+	echo "this command needs premium source code"
+        exit 1
+   fi
+
+   cd premium/zwatch
+   mvn -P function generate-sources
+   mkdir -p src/main/java/org/zstack/zwatch/returnwith/antlr4/
+   yes | cp target/generated-sources/antlr4/ReturnWith* src/main/java/org/zstack/zwatch/returnwith/antlr4/
+   rm -f target/generated-sources/antlr4/ReturnWith*
    cd - > /dev/null
 }
 
@@ -230,8 +257,12 @@ run_profile() {
 	notificationapi
     elif test x$1 = x'triggerexpression'; then
 	triggerexpression
+    elif test x$1 = x'zql'; then
+        zql
     elif test x$1 = x'cloudwatchfunction'; then
-	cloudwatchfunction
+	    cloudwatchfunction
+    elif test x$1 = x'zwatchzql'; then
+	    zwatchzql
     elif test x$1 = x'openapi'; then
         openapi
     else

@@ -1,10 +1,15 @@
 package org.zstack.utils;
 
+import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.io.IOUtils;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.StringWriter;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -120,11 +125,31 @@ public class StringDSL {
         }
     }
 
+    public static String getMd5Sum(String content) {
+        if (content == null) {
+            throw new RuntimeException("cannot get md5sum from null");
+        }
+        try {
+            return DigestUtils.md5Hex(new ByteArrayInputStream(content.getBytes()));
+        } catch (IOException e) {
+            throw new RuntimeException(String.format("read input stream err: %s", e.getMessage()));
+        }
+    }
+
     public static boolean isZStackUuid(String uuid) {
         return uuid != null && uuid.matches("[0-9a-f]{8}[0-9a-f]{4}[1-5][0-9a-f]{3}[89ab][0-9a-f]{3}[0-9a-f]{12}");
     }
 
     public static boolean isApiId(String apiId) {
         return apiId != null && apiId.matches("[0-9a-f]{8}[0-9a-f]{4}[0-9a-f]{4}[0-9a-f]{4}[0-9a-f]{12}");
+    }
+
+    private static int hashOXR(List lst) {
+        return lst.stream().mapToInt(Object::hashCode)
+                .reduce(0, (l, r) -> l ^ r);
+    }
+
+    public static boolean stringCompareInLineOrderIndpendent(String str1, String str2) {
+        return hashOXR(Arrays.asList(str1.split("\n"))) == hashOXR(Arrays.asList(str2.split("\n")));
     }
 }

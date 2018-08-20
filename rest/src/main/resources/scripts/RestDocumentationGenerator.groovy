@@ -6,6 +6,7 @@ import org.apache.commons.io.Charsets
 import org.apache.commons.lang.StringUtils
 import org.springframework.http.HttpMethod
 import org.zstack.core.Platform
+import org.zstack.header.core.NoDoc
 import org.zstack.header.errorcode.ErrorCode
 import org.zstack.header.exception.CloudRuntimeException
 import org.zstack.header.identity.SuppressCredentialCheck
@@ -76,7 +77,9 @@ class RestDocumentationGenerator implements DocumentGenerator {
             "securityGroupUuid": "安全组UUID",
             "eipUuid": "弹性IP UUID",
             "loadBalancerUuid": "负载均衡器UUID",
-            "rootVolumeUuid": "根云盘UUID"
+            "rootVolumeUuid": "根云盘UUID",
+            "userTag": "用户标签",
+            "systemTag": "系统标签"
     ]
 
     String CHINESE_CN = "zh_cn"
@@ -147,6 +150,10 @@ class RestDocumentationGenerator implements DocumentGenerator {
         }
 
         Set<Class> apiClasses = Platform.getReflections().getTypesAnnotatedWith(RestRequest.class).findAll { it.isAnnotationPresent(RestRequest.class) }
+        Set<String> noDocClasses = Platform.getReflections().getTypesAnnotatedWith(NoDoc.class)
+                .stream().map{ c -> c.getSimpleName() }.collect(Collectors.toSet())
+        System.out.println("no doc classes: ${noDocClasses}".toString())
+
         String specifiedClasses = System.getProperty("classes")
 
         if (specifiedClasses != null) {
@@ -155,6 +162,13 @@ class RestDocumentationGenerator implements DocumentGenerator {
                 return classes.contains(it.simpleName)
             }
         }
+
+        if (noDocClasses != null) {
+            apiClasses = apiClasses.findAll {
+                return !noDocClasses.contains(it.getSimpleName())
+            }
+        }
+
         def errInfo = []
         apiClasses.each {
             def docPath = getDocTemplatePathFromClass(it)
@@ -573,7 +587,8 @@ class RestDocumentationGenerator implements DocumentGenerator {
 
                 return m.invoke(null) as List<String>
             } catch (NoSuchMethodException e) {
-                throw new CloudRuntimeException("class[${clz.name}] doesn't have static __example__ method", e)
+                //throw new CloudRuntimeException("class[${clz.name}] doesn't have static __example__ method", e)
+                logger.warn("class[${clz.name}] doesn't have static __example__ method")
             }
         }
 
@@ -730,6 +745,26 @@ ${pythonSdk()}
                 return it.comment == null ? it.url : "${it.url} #${it.comment}"
             }
 
+            Class clz = doc._rest._request._clz
+            RestRequest at = clz.getAnnotation(RestRequest.class)
+            List<String> urlVars = getVarNamesFromUrl(at.path())
+
+            List<String> otherVars = doc._rest._request._params._cloumns.findAll {
+                return it._location == LOCATION_URL && !urlVars.contains(it._name)
+            }.collect {
+                return it._name
+            }
+
+            List params = []
+            otherVars.each {
+                params.add("$it={$it}")
+            }
+            if (params.size() > 0) {
+                txts = txts.collect {
+                    "${it}?${params.join("&")}"
+                }
+            }
+
             return """\
 ### URLs
 
@@ -847,7 +882,8 @@ ${table.join("\n")}
             } catch (InvalidApiMessageException ie) {
                 throw new CloudRuntimeException("cannot generate the markdown document for the class[${clz.name}], the __example__() method has an error: ${String.format(ie.getMessage(), ie.getArguments())}")
             } catch (NoSuchMethodException e) {
-                throw new CloudRuntimeException("class[${clz.name}] doesn't have static __example__ method", e)
+                //throw new CloudRuntimeException("class[${clz.name}] doesn't have static __example__ method", e)
+                logger.warn("class[${clz.name}] doesn't have static __example__ method")
             }
         }
 
@@ -886,8 +922,10 @@ ${table.join("\n")}
                     }
                     curl.add("${CURL_URL_BASE}${urlPath}")
                 } else {
+                    List<String> urlVars = getVarNamesFromUrl(at.path())
+
                     List<String> queryVars = doc._rest._request._params._cloumns.findAll {
-                        return it._location == LOCATION_QUERY
+                        return it._location == LOCATION_QUERY || (it._location == LOCATION_URL && !urlVars.contains(it._name))
                     }.collect {
                         return it._name
                     }
@@ -1132,7 +1170,8 @@ ${cols.join("\n")}
         }
 
         String generate() {
-            return  """\
+            try {
+                return """\
 ## ${doc._category} - ${doc._title}
 
 ${doc._desc}
@@ -1165,6 +1204,9 @@ ${javaSdk()}
 
 ${pythonSdk()}
 """
+            } catch (Exception e) {
+                logger.warn(e.message, e)
+            }
         }
     }
 
@@ -1476,7 +1518,7 @@ ${fieldStr}
                 }
 
                 def location
-                if (urlVars.contains(af.name)) {
+                if (urlVars.contains(af.name) || (at.method() == HttpMethod.DELETE && af.name != "systemTags" && af.name != "userTags")) {
                     location = LOCATION_URL
                 } else if (at.method() == HttpMethod.GET) {
                     location = LOCATION_QUERY

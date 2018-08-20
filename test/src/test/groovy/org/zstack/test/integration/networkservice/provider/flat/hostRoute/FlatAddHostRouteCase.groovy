@@ -10,6 +10,7 @@ import org.zstack.sdk.L3NetworkHostRouteInventory
 import org.zstack.sdk.L3NetworkInventory
 import org.zstack.sdk.PrimaryStorageInventory
 import org.zstack.sdk.HostInventory
+import org.zstack.sdk.VmInstanceInventory
 import org.zstack.test.integration.networkservice.provider.NetworkServiceProviderTest
 import org.zstack.test.integration.networkservice.provider.flat.FlatNetworkServiceEnv
 import org.zstack.testlib.EnvSpec
@@ -39,7 +40,7 @@ class FlatAddHostRouteCase extends SubCase {
 
     @Override
     void environment() {
-        env = FlatNetworkServiceEnv.oneHostNoVmEnv()
+        env = FlatNetworkServiceEnv.oneHostNoVmTwoFlatL3Env()
     }
 
     void testAddDns() {
@@ -55,10 +56,9 @@ class FlatAddHostRouteCase extends SubCase {
             prefix = "10.1.1.1/32"
             nexthop = "192.168.1.254"
         }
-        assert l3Inv.getHostRoute().size() == 3
+        assert l3Inv.getHostRoute().size() == 2
         for (L3NetworkHostRouteInventory route : l3Inv.getHostRoute()) {
-            assert (route.prefix == "10.1.1.1/32" || route.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX
-                || route.prefix == NetworkServiceConstants.DEFAULT_ROUTE_HOST_PREFIX)
+            assert (route.prefix == "10.1.1.1/32" || route.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX)
             if (route.prefix == "10.1.1.1/32") {
                 assert route.nexthop == "192.168.1.254"
             }
@@ -69,8 +69,7 @@ class FlatAddHostRouteCase extends SubCase {
             assert cmd.l3NetworkUuid == l3.uuid
             for (FlatDhcpBackend.DhcpInfo dinfo: cmd.dhcp) {
                 for (FlatDhcpBackend.HostRouteInfo rinfo : dinfo.hostRoutes) {
-                    assert (rinfo.prefix == "10.1.1.1/32" || rinfo.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX
-                            || rinfo.prefix == NetworkServiceConstants.DEFAULT_ROUTE_HOST_PREFIX)
+                    assert (rinfo.prefix == "10.1.1.1/32" || rinfo.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX)
                     if (rinfo.prefix == "10.1.1.1/32") {
                         assert rinfo.nexthop == "192.168.1.254"
                     }
@@ -89,17 +88,16 @@ class FlatAddHostRouteCase extends SubCase {
             prefix = "10.0.1.0/24"
             nexthop = "192.168.1.253"
         }
-        assert l3Inv.getHostRoute().size() == 4
+        assert l3Inv.getHostRoute().size() == 3
 
         assert cmds1.size() == 3
         for (FlatDhcpBackend.ApplyDhcpCmd cmd : cmds1) {
             assert cmd.l3NetworkUuid == l3.uuid
             for (FlatDhcpBackend.DhcpInfo dinfo: cmd.dhcp) {
-                assert dinfo.hostRoutes.size() == 4
+                assert dinfo.hostRoutes.size() == 3
                 for (FlatDhcpBackend.HostRouteInfo rinfo : dinfo.hostRoutes) {
                     assert (rinfo.prefix == "10.1.1.1/32" || rinfo.prefix == "10.0.1.0/24"
-                        || rinfo.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX
-                        || rinfo.prefix == NetworkServiceConstants.DEFAULT_ROUTE_HOST_PREFIX)
+                        || rinfo.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX)
                     if (rinfo.prefix == "10.1.1.1/32") {
                         assert rinfo.nexthop == "192.168.1.254"
                     } else if (rinfo.prefix == "10.0.1.0/24") {
@@ -120,10 +118,9 @@ class FlatAddHostRouteCase extends SubCase {
             l3NetworkUuid = l3.uuid
             prefix = "10.1.1.1/32"
         }
-        assert l3Inv.getHostRoute().size() == 3
+        assert l3Inv.getHostRoute().size() == 2
         for (L3NetworkHostRouteInventory route : l3Inv.getHostRoute()) {
-            assert (route.prefix == "10.0.1.0/24" || route.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX
-                    || route.prefix == NetworkServiceConstants.DEFAULT_ROUTE_HOST_PREFIX)
+            assert (route.prefix == "10.0.1.0/24" || route.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX)
             if (route.prefix == "10.0.1.0/24") {
                 assert route.nexthop == "192.168.1.253"
             }
@@ -134,8 +131,7 @@ class FlatAddHostRouteCase extends SubCase {
             assert cmd.l3NetworkUuid == l3.uuid
             for (FlatDhcpBackend.DhcpInfo dinfo: cmd.dhcp) {
                 for (FlatDhcpBackend.HostRouteInfo rinfo : dinfo.hostRoutes) {
-                    assert (rinfo.prefix == "10.0.1.0/24" || rinfo.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX
-                        || rinfo.prefix == NetworkServiceConstants.DEFAULT_ROUTE_HOST_PREFIX)
+                    assert (rinfo.prefix == "10.0.1.0/24" || rinfo.prefix == NetworkServiceConstants.METADATA_HOST_PREFIX)
                     if (rinfo.prefix == "10.0.1.0/24") {
                         assert rinfo.nexthop == "192.168.1.253"
                     }
@@ -153,18 +149,31 @@ class FlatAddHostRouteCase extends SubCase {
             l3NetworkUuid = l3.uuid
             prefix = "10.0.1.0/24"
         }
-        assert l3Inv.getHostRoute().size() == 2
+        assert l3Inv.getHostRoute().size() == 1
 
         assert cmds3.size() == 3
         for (FlatDhcpBackend.ApplyDhcpCmd cmd : cmds3) {
             assert cmd.l3NetworkUuid == l3.uuid
             for (FlatDhcpBackend.DhcpInfo dinfo: cmd.dhcp) {
-                assert dinfo.hostRoutes.size() == 2
-                assert (dinfo.hostRoutes.get(0).prefix == NetworkServiceConstants.METADATA_HOST_PREFIX
-                    || dinfo.hostRoutes.get(0).prefix == NetworkServiceConstants.METADATA_HOST_PREFIX)
+                assert dinfo.hostRoutes.size() == 1
+                assert dinfo.hostRoutes.get(0).prefix == NetworkServiceConstants.METADATA_HOST_PREFIX
             }
         }
 
+    }
+
+    void testAddFlatL3ToVm(){
+        def L3NetworkInventory l3_1 = env.inventoryByName("l3-1") as L3NetworkInventory
+        def vm4 = queryVmInstance { conditions=["name=test-4"]}[0] as VmInstanceInventory
+
+        detachL3NetworkFromVm {
+            vmNicUuid = vm4.getVmNics().get(0).getUuid()
+        }
+
+        attachL3NetworkToVm {
+            l3NetworkUuid = l3_1.uuid
+            vmInstanceUuid = vm4.uuid
+        }
     }
 
     @Override
@@ -226,6 +235,7 @@ class FlatAddHostRouteCase extends SubCase {
             }
 
             testAddDns()
+            testAddFlatL3ToVm()
         }
     }
 }

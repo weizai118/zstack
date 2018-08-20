@@ -20,7 +20,7 @@ public abstract class AbstractVmInstance implements VmInstance {
 
     static {
         allowedOperations.addState(VmInstanceState.Created,
-                StartNewCreatedVmInstanceMsg.class.getName(),
+                InstantiateNewCreatedVmInstanceMsg.class.getName(),
                 APIStartVmInstanceMsg.class.getName(),
                 StartVmInstanceMsg.class.getName()
         );
@@ -40,6 +40,7 @@ public abstract class AbstractVmInstance implements VmInstance {
                 AttachNicToVmMsg.class.getName(),
                 VmAttachNicMsg.class.getName(),
                 APIAttachL3NetworkToVmMsg.class.getName(),
+                APIAttachVmNicToVmMsg.class.getName(),
                 GetVmMigrationTargetHostMsg.class.getName(),
                 APIChangeInstanceOfferingMsg.class.getName(),
                 APIGetVmMigrationCandidateHostsMsg.class.getName(),
@@ -64,6 +65,7 @@ public abstract class AbstractVmInstance implements VmInstance {
                 CreateTemplateFromVmRootVolumeMsg.class.getName(),
                 VmAttachNicMsg.class.getName(),
                 APIAttachL3NetworkToVmMsg.class.getName(),
+                APIAttachVmNicToVmMsg.class.getName(),
                 APIChangeInstanceOfferingMsg.class.getName(),
                 StopVmInstanceMsg.class.getName(),
                 APIDetachL3NetworkFromVmMsg.class.getName(),
@@ -123,6 +125,7 @@ public abstract class AbstractVmInstance implements VmInstance {
                 AttachNicToVmMsg.class.getName(),
                 VmAttachNicMsg.class.getName(),
                 APIAttachL3NetworkToVmMsg.class.getName(),
+                APIAttachVmNicToVmMsg.class.getName(),
                 GetVmMigrationTargetHostMsg.class.getName(),
                 APIChangeInstanceOfferingMsg.class.getName(),
                 APIGetVmMigrationCandidateHostsMsg.class.getName(),
@@ -130,6 +133,7 @@ public abstract class AbstractVmInstance implements VmInstance {
                 DetachNicFromVmMsg.class.getName(),
                 APIAttachIsoToVmInstanceMsg.class.getName(),
                 APIDetachIsoFromVmInstanceMsg.class.getName(),
+                CreateTemplateFromVmRootVolumeMsg.class.getName(),
                 APIDeleteVmStaticIpMsg.class.getName());
 
         allowedOperations.addState(VmInstanceState.Pausing,

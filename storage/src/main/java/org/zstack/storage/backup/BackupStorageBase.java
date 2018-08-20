@@ -38,12 +38,11 @@ import org.zstack.header.storage.backup.BackupStorageCanonicalEvents.BackupStora
 import org.zstack.header.storage.backup.BackupStorageErrors.Opaque;
 import org.zstack.utils.Utils;
 import org.zstack.utils.logging.CLogger;
-
-import static org.zstack.core.Platform.childResourceToBaseResourceMap;
-import static org.zstack.core.Platform.operr;
+import static org.zstack.core.Platform.*;
 
 import javax.persistence.LockModeType;
 import javax.persistence.Query;
+import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.Arrays;
 import java.util.List;
@@ -131,7 +130,7 @@ public abstract class BackupStorageBase extends AbstractBackupStorage {
 
         String len;
         try {
-            HttpHeaders header = restf.getRESTTemplate().headForHeaders(url);
+            HttpHeaders header = restf.getRESTTemplate().headForHeaders(URI.create(url));
             len = header.getFirst("Content-Length");
         } catch (Exception e) {
             throw new OperationFailureException(operr("cannot get image. The image url is %s. Exception is %s", url, e.toString()));

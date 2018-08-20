@@ -127,7 +127,7 @@ public class SecurityGroupManagerImpl extends AbstractService implements Securit
 
                 if (sgn + 1 > sgNum) {
                     throw new ApiMessageInterceptionException(new QuotaUtil().buildQuataExceedError(
-                                    msg.getSession().getAccountUuid(), SecurityGroupQuotaConstant.SG_NUM, sgNum));
+                            msg.getSession().getAccountUuid(), SecurityGroupQuotaConstant.SG_NUM, sgNum));
                 }
             }
         };
@@ -494,9 +494,17 @@ public class SecurityGroupManagerImpl extends AbstractService implements Securit
             handle((RefreshSecurityGroupRulesOnVmMsg) msg);
         } else if (msg instanceof RemoveVmNicFromSecurityGroupMsg) {
             handle((RemoveVmNicFromSecurityGroupMsg) msg);
+        } else if (msg instanceof SecurityGroupDeletionMsg) {
+            handle((SecurityGroupDeletionMsg) msg);
         } else {
             bus.dealWithUnknownMessage(msg);
         }
+    }
+
+    private void handle(SecurityGroupDeletionMsg msg) {
+        SecurityGroupDeletionReply reply = new SecurityGroupDeletionReply();
+        dbf.removeByPrimaryKey(msg.getUuid(), SecurityGroupVO.class);
+        bus.reply(msg, reply);
     }
 
     private void handle(RemoveVmNicFromSecurityGroupMsg msg) {
@@ -1046,6 +1054,7 @@ public class SecurityGroupManagerImpl extends AbstractService implements Securit
         vo.setDescription(msg.getDescription());
         vo.setState(SecurityGroupState.Enabled);
         vo.setInternalId(dbf.generateSequenceNumber(SecurityGroupSequenceNumberVO.class));
+        vo.setAccountUuid(msg.getSession().getAccountUuid());
 
         SecurityGroupVO finalVo = vo;
         vo = new SQLBatchWithReturn<SecurityGroupVO>() {
@@ -1053,7 +1062,6 @@ public class SecurityGroupManagerImpl extends AbstractService implements Securit
             protected SecurityGroupVO scripts() {
                 persist(finalVo);
                 reload(finalVo);
-                acntMgr.createAccountResourceRef(msg.getSession().getAccountUuid(), finalVo.getUuid(), SecurityGroupVO.class);
                 tagMgr.createTagsFromAPICreateMessage(msg, finalVo.getUuid(), SecurityGroupVO.class.getSimpleName());
                 return finalVo;
             }

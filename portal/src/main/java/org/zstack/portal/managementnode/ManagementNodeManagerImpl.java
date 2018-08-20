@@ -248,7 +248,7 @@ public class ManagementNodeManagerImpl extends AbstractService implements Manage
     }
 
     private void populateComponents() {
-        components = new ArrayList<ComponentWrapper>();
+        components = new ArrayList<>();
         for (final Component c : pluginRgty.getExtensionList(Component.class)) {
             components.add(new ComponentWrapper() {
                 boolean isStart = false;
@@ -264,13 +264,10 @@ public class ManagementNodeManagerImpl extends AbstractService implements Manage
                 @Override
                 public void stop() {
                     if (isStart) {
-                        throwableSafe(new Runnable() {
-                            @Override
-                            public void run() {
-                                c.stop();
-                                logger.info("Stopped component: " + c.getClass().getName());
-                                isStart = false;
-                            }
+                        throwableSafe((Runnable) () -> {
+                            c.stop();
+                            logger.info("Stopped component: " + c.getClass().getName());
+                            isStart = false;
                         }, String.format("unable to stop component[%s]", c.getClass().getName()));
                     }
                 }
@@ -379,6 +376,14 @@ public class ManagementNodeManagerImpl extends AbstractService implements Manage
                     bus.unregisterService(self);
                     trigger.rollback();
                 }
+            }).then(new NoRollbackFlow() {
+                String __name__ = "call-prepare-db-extension";
+
+                @Override
+                public void run(FlowTrigger trigger, Map data) {
+                    callPrepareDbExtensions();
+                    trigger.next();
+                }
             }).then(new Flow() {
                 String __name__ = "start-components";
 
@@ -392,14 +397,6 @@ public class ManagementNodeManagerImpl extends AbstractService implements Manage
                 public void rollback(FlowRollback trigger, Map data) {
                     stopComponents();
                     trigger.rollback();
-                }
-            }).then(new NoRollbackFlow() {
-                String __name__ = "call-prepare-db-extension";
-
-                @Override
-                public void run(FlowTrigger trigger, Map data) {
-                    callPrepareDbExtensions();
-                    trigger.next();
                 }
             }).then(new Flow() {
                 String __name__ = "create-DB-record";
@@ -695,10 +692,27 @@ public class ManagementNodeManagerImpl extends AbstractService implements Manage
                         nodeLifeCycle.nodeLeft(ourNode);
                     }
                 }
+
+                // check if any node missing in our hash ring
+                nodesInDb.forEach(nuuid -> {
+                    if (nuuid.equals(node.getUuid())) {
+                        return;
+                    }
+
+                    if (!destinationMaker.getManagementNodesInHashRing().contains(nuuid)) {
+                        new Runnable() {
+                            @Override
+                            @AsyncThread
+                            public void run() {
+                                nodeLifeCycle.nodeJoin(nuuid);
+                            }
+                        }.run();
+                    }
+                });
             }
 
             @Override
-            public Void call() throws Exception {
+            public Void call() {
                 int heartbeatFailure = 0;
 
                 while (true) {
@@ -889,6 +903,7 @@ public class ManagementNodeManagerImpl extends AbstractService implements Manage
 
     @Override
     public void quit(String reason) {
+        new BootErrorLog().write(reason);
         logger.debug(String.format("stopping the management node because %s", reason));
         stop();
     }

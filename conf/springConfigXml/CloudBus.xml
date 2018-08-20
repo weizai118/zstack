@@ -18,10 +18,13 @@
         </zstack:plugin>
     </bean>
 
-    <bean id="CloudBus" class = "org.zstack.core.cloudbus.CloudBusImpl2" depends-on="ThreadFacade,ThreadAspectj">
-    	<zstack:plugin>
-			<zstack:extension interface="org.zstack.header.managementnode.ManagementNodeChangeListener" order="9999"/>
-		</zstack:plugin>
+    <bean id="CloudBus" class = "org.zstack.core.cloudbus.CloudBusImpl3" depends-on="ThreadFacade,ThreadAspectj">
+    </bean>
+
+    <bean id="CloudBusJMX" class = "org.zstack.core.cloudbus.CloudBusJMX">
+        <zstack:plugin>
+            <zstack:extension interface="org.zstack.header.Component" />
+        </zstack:plugin>
     </bean>
 
     <bean id="EventFacade" class = "org.zstack.core.cloudbus.EventFacadeImpl">

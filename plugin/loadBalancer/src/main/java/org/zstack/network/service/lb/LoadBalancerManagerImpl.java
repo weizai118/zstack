@@ -102,7 +102,17 @@ public class LoadBalancerManagerImpl extends AbstractService implements LoadBala
     }
 
     protected void handleLocalMessage(Message msg) {
-        bus.dealWithUnknownMessage(msg);
+        if (msg instanceof CertificateDeletionMsg) {
+            handle((CertificateDeletionMsg) msg);
+        } else {
+            bus.dealWithUnknownMessage(msg);
+        }
+    }
+
+    private void handle(CertificateDeletionMsg msg) {
+        CertificateDeletionReply reply = new CertificateDeletionReply();
+        dbf.removeByPrimaryKey(msg.getUuid(), CertificateVO.class);
+        bus.reply(msg, reply);
     }
 
     protected void handleApiMessage(APIMessage msg) {
@@ -142,9 +152,9 @@ public class LoadBalancerManagerImpl extends AbstractService implements LoadBala
                         vo.setDescription(msg.getDescription());
                         vo.setVipUuid(msg.getVipUuid());
                         vo.setState(LoadBalancerState.Enabled);
+                        vo.setAccountUuid(msg.getSession().getAccountUuid());
                         vo = dbf.persistAndRefresh(vo);
 
-                        acntMgr.createAccountResourceRef(msg.getSession().getAccountUuid(), vo.getUuid(), LoadBalancerVO.class);
                         tagMgr.createTagsFromAPICreateMessage(msg, vo.getUuid(), LoadBalancerVO.class.getSimpleName());
                         /* put vo to data for rollback */
                         data.put(LoadBalancerConstants.Param.LOAD_BALANCER_VO, vo);
@@ -236,9 +246,9 @@ public class LoadBalancerManagerImpl extends AbstractService implements LoadBala
             vo.setDescription(msg.getDescription());
         }
         vo.setCertificate(msg.getCertificate());
+        vo.setAccountUuid(msg.getSession().getAccountUuid());
         vo = dbf.persistAndRefresh(vo);
 
-        acntMgr.createAccountResourceRef(msg.getSession().getAccountUuid(), vo.getUuid(), CertificateVO.class);
         tagMgr.createTagsFromAPICreateMessage(msg, vo.getUuid(), CertificateVO.class.getSimpleName());
 
         evt.setInventory(CertificateInventory.valueOf(vo));

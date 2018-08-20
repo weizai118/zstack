@@ -170,6 +170,9 @@ public class FlatDhcpBackend extends AbstractService implements NetworkServiceDh
 
         List<DhcpInfo> dhcpInfoList = new ArrayList<DhcpInfo>();
         for (VmNicVO nic : nics) {
+            if (nic.getIp() == null) {
+                continue;
+            }
             DhcpInfo info = new DhcpInfo();
             info.bridgeName = KVMSystemTags.L2_BRIDGE_NAME.getTokenByTag(bridgeNames.get(nic.getL3NetworkUuid()), KVMSystemTags.L2_BRIDGE_NAME_TOKEN);
             info.namespaceName = makeNamespaceName(
@@ -190,7 +193,7 @@ public class FlatDhcpBackend extends AbstractService implements NetworkServiceDh
 
             if (info.isDefaultL3Network) {
                 info.hostname = hostnames.get(nic.getVmInstanceUuid());
-                if (info.hostname == null) {
+                if (info.hostname == null && nic.getIp() != null) {
                     info.hostname = nic.getIp().replaceAll("\\.", "-");
                 }
 
@@ -530,6 +533,9 @@ public class FlatDhcpBackend extends AbstractService implements NetworkServiceDh
 
         List<DhcpInfo> dhcpInfoList = new ArrayList<DhcpInfo>();
         for (VmNicVO nic : nics) {
+            if (nic.getIp() == null) {
+                continue;
+            }
             DhcpInfo info = new DhcpInfo();
             info.bridgeName = KVMSystemTags.L2_BRIDGE_NAME.getTokenByTag(bridgeNames.get(nic.getL3NetworkUuid()), KVMSystemTags.L2_BRIDGE_NAME_TOKEN);
             info.namespaceName = makeNamespaceName(
@@ -549,7 +555,7 @@ public class FlatDhcpBackend extends AbstractService implements NetworkServiceDh
 
             if (info.isDefaultL3Network) {
                 info.hostname = hostnames.get(nic.getVmInstanceUuid());
-                if (info.hostname == null) {
+                if (info.hostname == null && nic.getIp() != null) {
                     info.hostname = nic.getIp().replaceAll("\\.", "-");
                 }
 
@@ -973,6 +979,14 @@ public class FlatDhcpBackend extends AbstractService implements NetworkServiceDh
         if (dns == null) {
             dns = new ArrayList<String>();
         }
+
+        if (FlatNetwordProviderGlobalConfig.ALLOW_DEFAULT_DNS.value(Boolean.class)) {
+            UsedIpInventory dhcpIp = getDHCPServerIP(l3NetworkUuid);
+            if (dhcpIp != null) {
+                dns.add(dhcpIp.getIp());
+            }
+        }
+
         return dns;
     }
 
@@ -1005,6 +1019,9 @@ public class FlatDhcpBackend extends AbstractService implements NetworkServiceDh
         return CollectionUtils.transformToList(structs, new Function<DhcpInfo, DhcpStruct>() {
             @Override
             public DhcpInfo call(DhcpStruct arg) {
+                if (arg.getIp() == null) {
+                    return null;
+                }
                 DhcpInfo info = new DhcpInfo();
                 info.dnsDomain = arg.getDnsDomain();
                 info.gateway = arg.getGateway();

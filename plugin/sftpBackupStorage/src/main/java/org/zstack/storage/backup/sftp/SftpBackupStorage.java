@@ -4,10 +4,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.util.UriComponentsBuilder;
 import org.zstack.core.CoreGlobalProperty;
-import org.zstack.core.ansible.AnsibleFacade;
-import org.zstack.core.ansible.AnsibleGlobalProperty;
-import org.zstack.core.ansible.AnsibleRunner;
-import org.zstack.core.ansible.SshFileMd5Checker;
+import org.zstack.core.ansible.*;
 import org.zstack.core.errorcode.ErrorFacade;
 import org.zstack.core.timeout.ApiTimeoutManager;
 import org.zstack.header.core.Completion;
@@ -336,8 +333,16 @@ public class SftpBackupStorage extends BackupStorageBase {
         checker.addSrcDestPair(PathUtil.findFileOnClassPath(String.format("ansible/sftpbackupstorage/%s", agentPackageName), true).getAbsolutePath(),
                 String.format("/var/lib/zstack/sftpbackupstorage/package/%s", agentPackageName));
 
+
+        SshChronyConfigChecker chronyChecker = new SshChronyConfigChecker();
+        chronyChecker.setTargetIp(getSelf().getHostname());
+        chronyChecker.setUsername(getSelf().getUsername());
+        chronyChecker.setPassword(getSelf().getPassword());
+        chronyChecker.setSshPort(getSelf().getSshPort());
+
         AnsibleRunner runner = new AnsibleRunner();
         runner.installChecker(checker);
+        runner.installChecker(chronyChecker);
         runner.setPassword(getSelf().getPassword());
         runner.setUsername(getSelf().getUsername());
         runner.setTargetIp(getSelf().getHostname());
@@ -345,7 +350,11 @@ public class SftpBackupStorage extends BackupStorageBase {
         runner.setAgentPort(SftpBackupStorageGlobalProperty.AGENT_PORT);
         runner.setPlayBookName(SftpBackupStorageConstant.ANSIBLE_PLAYBOOK_NAME);
         runner.putArgument("pkg_sftpbackupstorage", agentPackageName);
-        if (CoreGlobalProperty.CHRONY_SERVERS != null && !CoreGlobalProperty.CHRONY_SERVERS.isEmpty()) {
+        if (CoreGlobalProperty.SYNC_NODE_TIME) {
+            if (CoreGlobalProperty.CHRONY_SERVERS == null || CoreGlobalProperty.CHRONY_SERVERS.isEmpty()) {
+                complete.fail(operr("chrony server not configured!"));
+                return;
+            }
             runner.putArgument("chrony_servers", String.join(",", CoreGlobalProperty.CHRONY_SERVERS));
         }
         runner.run(new Completion(complete) {

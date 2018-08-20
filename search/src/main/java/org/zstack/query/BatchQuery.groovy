@@ -26,6 +26,9 @@ import org.zstack.header.query.QueryOp
 import org.zstack.utils.Utils
 import org.zstack.utils.gson.JSONObjectUtil
 import org.zstack.utils.logging.CLogger
+import org.zstack.zql.ZQL
+import org.zstack.zql.ZQLContext
+import org.zstack.zql.ZQLQueryReturn
 
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
@@ -277,6 +280,13 @@ class BatchQuery {
         return res
     }
 
+    private List<ZQLQueryReturn> zqlQuery(String qstr){
+        ZQLContext.putAPISession(session)
+        List result = ZQL.fromString(qstr).getResultList()
+        ZQLContext.cleanAPISession()
+        return result
+    }
+
     private Map doQuery(String qstr) {
         List<String> words = qstr.split(" ")
         words = words.findAll { !it.isEmpty() }
@@ -369,17 +379,16 @@ class BatchQuery {
             }
         }
 
-        Long total = null
-        if (count || replyWithCount) {
-            total = queryf.count(msg, inventoryClass)
+        if (count) {
+            msg.setCount(true)
+        }
+        if (replyWithCount) {
+            msg.setReplyWithCount(true)
         }
 
-        List ret = null
-        if (!count) {
-            ret = queryf.query(msg, inventoryClass)
-        }
+        ZQLQueryReturn ret = queryf.queryUseZQL(msg, inventoryClass)
 
-        def res = ["total": total, "result": JSONObjectUtil.rehashObject(ret, ArrayList.class)]
+        def res = ["total": ret.total, "result": ret.inventories == null ? null : JSONObjectUtil.rehashObject(ret.inventories, ArrayList.class)]
 
         endDebug(msg, res)
 
@@ -429,10 +438,12 @@ class BatchQuery {
             def query = { doQuery(it) }
             def put = { k, v -> output[k] = v }
             def call = { apiName, value -> syncApiCall(apiName, value) }
+            def zql = { zqlQuery(it) }
 
             binding.setVariable("query", query)
             binding.setVariable("put", put)
             binding.setVariable("call", call)
+            binding.setVariable("zql", zql)
 
             def cc = new CompilerConfiguration()
             cc.addCompilationCustomizers(new SandboxTransformer())
@@ -441,7 +452,9 @@ class BatchQuery {
             sandbox.register()
             try {
                 Script script = shell.parse(msg.script)
+                ZQLContext.putAPISession(msg.session)
                 script.run()
+                ZQLContext.clean()
                 clearAllClassInfo(script.getClass())
             } catch (Throwable t) {
                 logger.warn(t.message, t)

@@ -21,6 +21,7 @@ import org.zstack.core.Platform;
 import org.zstack.core.cloudbus.CloudBus;
 import org.zstack.core.cloudbus.CloudBusEventListener;
 import org.zstack.core.cloudbus.CloudBusGlobalProperty;
+import org.zstack.core.cloudbus.CloudBusGson;
 import org.zstack.core.retry.Retry;
 import org.zstack.core.retry.RetryCondition;
 import org.zstack.header.Component;
@@ -136,7 +137,11 @@ public class RestServer implements Component, CloudBusEventListener {
     public static void generateMarkdownDoc(String path) {
         System.setProperty(Constants.UUID_FOR_EXAMPLE, "true");
         DocumentGenerator rg =  GroovyUtils.newInstance("scripts/RestDocumentationGenerator.groovy");
-        rg.generateMarkDown(path, PathUtil.join(System.getProperty("user.home"), "zstack-markdown"));
+        try {
+            rg.generateMarkDown(path, PathUtil.join(System.getProperty("user.home"), "zstack-markdown"));
+        } catch (Exception e) {
+            logger.warn(e.getMessage(), e);
+        }
     }
 
     public static void generateJavaSdk() {
@@ -236,7 +241,7 @@ public class RestServer implements Component, CloudBusEventListener {
             response.setError(evt.getError());
         }
 
-        String body = JSONObjectUtil.toJsonString(response);
+        String body = CloudBusGson.toJson(response);
         HttpUrl url = HttpUrl.parse(d.webHook);
         Request.Builder rb = new Request.Builder().url(url)
                 .post(RequestBody.create(JSON, body))
@@ -643,7 +648,7 @@ public class RestServer implements Component, CloudBusEventListener {
     }
 
     private void sendResponse(int statusCode, ApiResponse response, HttpServletResponse rsp) throws IOException {
-        sendResponse(statusCode, response.isEmpty() ? "" : JSONObjectUtil.toJsonString(response), rsp);
+        sendResponse(statusCode, response.isEmpty() ? "" : CloudBusGson.toJson(response), rsp);
     }
 
     private void handleNonUniqueApi(Collection<Api> apis, HttpEntity<String> entity, HttpServletRequest req, HttpServletResponse rsp) throws RestException, InvocationTargetException, NoSuchMethodException, InstantiationException, IllegalAccessException, IOException {

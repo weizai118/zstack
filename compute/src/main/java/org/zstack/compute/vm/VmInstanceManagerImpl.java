@@ -1,7 +1,9 @@
 package org.zstack.compute.vm;
 
+import com.mysql.jdbc.exceptions.jdbc4.MySQLIntegrityConstraintViolationException;
 import org.apache.commons.validator.routines.DomainValidator;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.orm.jpa.JpaSystemException;
 import org.springframework.transaction.annotation.Transactional;
 import org.zstack.compute.allocator.HostAllocatorManager;
 import org.zstack.core.Platform;
@@ -34,7 +36,7 @@ import org.zstack.header.configuration.InstanceOfferingVO;
 import org.zstack.header.core.FutureCompletion;
 import org.zstack.header.core.NoErrorCompletion;
 import org.zstack.header.core.ReturnValueCompletion;
-import org.zstack.header.core.workflow.FlowChain;
+import org.zstack.header.core.workflow.*;
 import org.zstack.header.errorcode.ErrorCode;
 import org.zstack.header.errorcode.OperationFailureException;
 import org.zstack.header.errorcode.SysErrors;
@@ -209,6 +211,10 @@ public class VmInstanceManagerImpl extends AbstractService implements
             handle((APIGetVmInstanceMsg) msg);
         } else if (msg instanceof APIListVmNicMsg) {
             handle((APIListVmNicMsg) msg);
+        } else if(msg instanceof APICreateVmNicMsg) {
+            handle((APICreateVmNicMsg) msg);
+        } else if (msg instanceof APIDeleteVmNicMsg) {
+            handle((APIDeleteVmNicMsg) msg);
         } else if (msg instanceof APIGetCandidateZonesClustersHostsForCreatingVmMsg) {
             handle((APIGetCandidateZonesClustersHostsForCreatingVmMsg) msg);
         } else if (msg instanceof APIGetCandidatePrimaryStoragesForCreatingVmMsg) {
@@ -662,6 +668,124 @@ public class VmInstanceManagerImpl extends AbstractService implements
         bus.reply(msg, reply);
     }
 
+    private void handle(APICreateVmNicMsg msg) {
+        final APICreateVmNicEvent evt = new APICreateVmNicEvent(msg.getId());
+        VmNicInventory nic = new VmNicInventory();
+
+        FlowChain flowChain = FlowChainBuilder.newSimpleFlowChain();
+        flowChain.setName(String.format("create-nic-on-l3-network-%s", msg.getL3NetworkUuid()));
+        flowChain.then(new NoRollbackFlow() {
+            String __name__ = "allocate-nic-ip-and-mac";
+
+            @Override
+            public void run(FlowTrigger trigger, Map data) {
+                AllocateIpMsg allocateIpMsg = new AllocateIpMsg();
+                allocateIpMsg.setRequiredIp(msg.getIp());
+                allocateIpMsg.setL3NetworkUuid(msg.getL3NetworkUuid());
+                bus.makeTargetServiceIdByResourceUuid(allocateIpMsg, L3NetworkConstant.SERVICE_ID, msg.getL3NetworkUuid());
+
+                bus.send(allocateIpMsg, new CloudBusCallBack(msg) {
+                    @Override
+                    public void run(MessageReply reply) {
+                        if (!reply.isSuccess()) {
+                            trigger.fail(reply.getError());
+                            return;
+                        }
+
+                        AllocateIpReply areply = reply.castReply();
+                        int deviceId = 1;
+                        nic.setUuid(Platform.getUuid());
+                        nic.setIp(areply.getIpInventory().getIp());
+                        nic.setUsedIpUuid(areply.getIpInventory().getUuid());
+                        nic.setL3NetworkUuid(areply.getIpInventory().getL3NetworkUuid());
+
+                        assert nic.getL3NetworkUuid() != null;
+                        nic.setMac(NetworkUtils.generateMacWithDeviceId((short) deviceId));
+                        nic.setDeviceId(deviceId);
+                        nic.setNetmask(areply.getIpInventory().getNetmask());
+                        nic.setGateway(areply.getIpInventory().getGateway());
+
+                        trigger.next();
+                    }
+                });
+            }
+        }).then(new Flow() {
+            String __name__ = "persist-nic-to-db";
+
+            @Override
+            public void run(FlowTrigger trigger, Map data) {
+                VmNicVO vo = new VmNicVO();
+                vo.setUuid(nic.getUuid());
+                vo.setIp(nic.getIp());
+                vo.setL3NetworkUuid(nic.getL3NetworkUuid());
+                vo.setUsedIpUuid(nic.getUsedIpUuid());
+                vo.setVmInstanceUuid(nic.getVmInstanceUuid());
+                vo.setDeviceId(nic.getDeviceId());
+                vo.setMac(nic.getMac());
+                vo.setNetmask(nic.getNetmask());
+                vo.setGateway(nic.getGateway());
+                vo.setInternalName(nic.getInternalName());
+                vo.setAccountUuid(msg.getSession().getAccountUuid());
+
+                int tries = 5;
+                while (tries-- > 0) {
+                    try {
+                        new SQLBatch() {
+                            @Override
+                            protected void scripts() {
+                                persist(vo);
+                            }
+                        }.execute();
+                    } catch (JpaSystemException e) {
+                        if (e.getRootCause() instanceof MySQLIntegrityConstraintViolationException &&
+                                e.getRootCause().getMessage().contains("Duplicate entry")) {
+                            logger.debug(String.format("Concurrent mac allocation. Mac[%s] has been allocated, try allocating another one. " +
+                                    "The error[Duplicate entry] printed by jdbc.spi.SqlExceptionHelper is no harm, " +
+                                    "we will try finding another mac", vo.getMac()));
+                            logger.trace("", e);
+                            vo.setMac(NetworkUtils.generateMacWithDeviceId((short) vo.getDeviceId()));
+                        } else {
+                            throw e;
+                        }
+                    }
+                }
+
+                trigger.next();
+            }
+
+            @Override
+            public void rollback(FlowRollback trigger, Map data) {
+                ReturnIpMsg msg = new ReturnIpMsg();
+                msg.setL3NetworkUuid(nic.getL3NetworkUuid());
+                msg.setUsedIpUuid(nic.getUsedIpUuid());
+                bus.makeTargetServiceIdByResourceUuid(msg, L3NetworkConstant.SERVICE_ID, nic.getL3NetworkUuid());
+
+                bus.send(msg, new CloudBusCallBack(trigger) {
+                    @Override
+                    public void run(MessageReply replie) {
+                        dbf.removeByPrimaryKey(nic.getUuid(), VmNicVO.class);
+                        trigger.rollback();
+                    }
+                });
+            }
+        });
+
+        flowChain.done(new FlowDoneHandler(msg) {
+            @Override
+            public void handle(Map data) {
+            	tagMgr.createTagsFromAPICreateMessage(msg, nic.getUuid(), VmNicVO.class.getSimpleName());
+                evt.setInventory(nic);
+                bus.publish(evt);
+            }
+        }).error(new FlowErrorHandler(msg) {
+            @Override
+            public void handle(final ErrorCode errCode, Map data) {
+                evt.setError(errCode);
+                bus.publish(evt);
+            }
+        }).start();
+    }
+
     private void handle(APIGetVmInstanceMsg msg) {
         SearchQuery<VmInstanceInventory> query = new SearchQuery(VmInstanceInventory.class);
         query.addAccountAsAnd(msg);
@@ -729,12 +853,9 @@ public class VmInstanceManagerImpl extends AbstractService implements
         vo = new SQLBatchWithReturn<VmInstanceVO>() {
             @Override
             protected VmInstanceVO scripts() {
+                finalVo.setAccountUuid(msg.getAccountUuid());
                 factory.createVmInstance(finalVo, msg);
-                dbf.getEntityManager().flush();
-                dbf.getEntityManager().refresh(finalVo);
-                acntMgr.createAccountResourceRef(msg.getAccountUuid(), finalVo.getUuid(), VmInstanceVO.class);
-
-                return finalVo;
+                return reload(finalVo);
             }
         }.execute();
 
@@ -765,6 +886,7 @@ public class VmInstanceManagerImpl extends AbstractService implements
             extEmitter.handleSystemTag(vo.getUuid(), cmsg.getSystemTags());
         }
 
+        InstantiateNewCreatedVmInstanceMsg smsg = new InstantiateNewCreatedVmInstanceMsg();
         if (VmCreationStrategy.JustCreate == VmCreationStrategy.valueOf(msg.getStrategy())) {
             VmInstanceInventory inv = VmInstanceInventory.valueOf(vo);
             createVmButNotStart(msg, inv);
@@ -772,20 +894,21 @@ public class VmInstanceManagerImpl extends AbstractService implements
             return;
         }
 
-        StartNewCreatedVmInstanceMsg smsg = new StartNewCreatedVmInstanceMsg();
         smsg.setDataDiskOfferingUuids(msg.getDataDiskOfferingUuids());
         smsg.setL3NetworkUuids(msg.getL3NetworkUuids());
         smsg.setRootDiskOfferingUuid(msg.getRootDiskOfferingUuid());
         smsg.setVmInstanceInventory(VmInstanceInventory.valueOf(vo));
         smsg.setPrimaryStorageUuidForRootVolume(msg.getPrimaryStorageUuidForRootVolume());
         smsg.setPrimaryStorageUuidForDataVolume(msg.getPrimaryStorageUuidForDataVolume());
+        smsg.setStrategy(msg.getStrategy());
+        smsg.setTimeout(msg.getTimeout());
         bus.makeTargetServiceIdByResourceUuid(smsg, VmInstanceConstant.SERVICE_ID, vo.getUuid());
         bus.send(smsg, new CloudBusCallBack(smsg) {
             @Override
             public void run(MessageReply reply) {
                 try {
                     if (reply.isSuccess()) {
-                        StartNewCreatedVmInstanceReply r = (StartNewCreatedVmInstanceReply) reply;
+                        InstantiateNewCreatedVmInstanceReply r = (InstantiateNewCreatedVmInstanceReply) reply;
                         completion.success(r.getVmInventory());
                     } else {
                         completion.fail(reply.getError());
@@ -799,8 +922,8 @@ public class VmInstanceManagerImpl extends AbstractService implements
     }
 
     private void createVmButNotStart(CreateVmInstanceMsg msg, VmInstanceInventory inv) {
-        StartVmFromNewCreatedStruct struct = StartVmFromNewCreatedStruct.fromMessage(msg);
-        new JsonLabel().create(StartVmFromNewCreatedStruct.makeLabelKey(inv.getUuid()), struct, inv.getUuid());
+        InstantiateVmFromNewCreatedStruct struct = InstantiateVmFromNewCreatedStruct.fromMessage(msg);
+        new JsonLabel().create(InstantiateVmFromNewCreatedStruct.makeLabelKey(inv.getUuid()), struct, inv.getUuid());
     }
 
     private void handle(final CreateVmInstanceMsg msg) {
@@ -883,6 +1006,44 @@ public class VmInstanceManagerImpl extends AbstractService implements
             @Override
             public void fail(ErrorCode errorCode) {
                 evt.setError(errorCode);
+                bus.publish(evt);
+            }
+        });
+    }
+
+    private void handle(final APIDeleteVmNicMsg msg) {
+        APIDeleteVmNicEvent evt = new APIDeleteVmNicEvent(msg.getId());
+
+        VmNicVO nic = dbf.findByUuid(msg.getUuid(), VmNicVO.class);
+        if (nic.getVmInstanceUuid() == null) {
+            ReturnIpMsg returnIpMsg = new ReturnIpMsg();
+            returnIpMsg.setUsedIpUuid(nic.getUsedIpUuid());
+            returnIpMsg.setL3NetworkUuid(nic.getL3NetworkUuid());
+            bus.makeTargetServiceIdByResourceUuid(returnIpMsg, L3NetworkConstant.SERVICE_ID, nic.getL3NetworkUuid());
+            bus.send(returnIpMsg, new CloudBusCallBack(msg) {
+                @Override
+                public void run(MessageReply reply) {
+                    if (reply.isSuccess()) {
+                        dbf.removeByPrimaryKey(nic.getUuid(), VmNicVO.class);
+                    } else {
+                        evt.setError(reply.getError());
+                    }
+                    bus.publish(evt);
+                }
+            });
+            return;
+        }
+
+        DetachNicFromVmMsg detachNicFromVmMsg = new DetachNicFromVmMsg();
+        detachNicFromVmMsg.setVmInstanceUuid(nic.getVmInstanceUuid());
+        detachNicFromVmMsg.setVmNicUuid(nic.getUuid());
+        bus.makeTargetServiceIdByResourceUuid(detachNicFromVmMsg, VmInstanceConstant.SERVICE_ID, nic.getVmInstanceUuid());
+        bus.send(detachNicFromVmMsg, new CloudBusCallBack(msg) {
+            @Override
+            public void run(MessageReply reply) {
+                if (!reply.isSuccess()) {
+                    evt.setError(reply.getError());
+                }
                 bus.publish(evt);
             }
         });
@@ -1010,7 +1171,8 @@ public class VmInstanceManagerImpl extends AbstractService implements
                         String hostname = VmSystemTags.HOSTNAME.getTokenByTag(sysTag, VmSystemTags.HOSTNAME_TOKEN);
 
                         validateHostname(sysTag, hostname);
-                        validateHostNameOnDefaultL3Network(sysTag, hostname, msg.getDefaultL3NetworkUuid());
+                        List<String> l3NetworkUuids = msg.getL3NetworkUuids();
+                        l3NetworkUuids.forEach(it->validateHostNameOnDefaultL3Network(sysTag, hostname, it));
                     } else if (VmSystemTags.STATIC_IP.isMatch(sysTag)) {
                         validateStaticIp(sysTag);
                     }
@@ -1047,7 +1209,7 @@ public class VmInstanceManagerImpl extends AbstractService implements
             }
 
             @Transactional(readOnly = true)
-            private void validateHostNameOnDefaultL3Network(String tag, String hostname, String l3Uuid) {
+            private List<SystemTagVO> querySystemTagsByL3(String tag, String l3Uuid) {
                 String sql = "select t" +
                         " from SystemTagVO t, VmInstanceVO vm, VmNicVO nic" +
                         " where t.resourceUuid = vm.uuid" +
@@ -1057,7 +1219,11 @@ public class VmInstanceManagerImpl extends AbstractService implements
                 TypedQuery<SystemTagVO> q = dbf.getEntityManager().createQuery(sql, SystemTagVO.class);
                 q.setParameter("l3Uuid", l3Uuid);
                 q.setParameter("sysTag", tag);
-                List<SystemTagVO> vos = q.getResultList();
+                return q.getResultList();
+            }
+
+            private void validateHostNameOnDefaultL3Network(String tag, String hostname, String l3Uuid) {
+                List<SystemTagVO> vos = querySystemTagsByL3(tag, l3Uuid);
 
                 if (!vos.isEmpty()) {
                     SystemTagVO sameTag = vos.get(0);
@@ -1281,483 +1447,7 @@ public class VmInstanceManagerImpl extends AbstractService implements
 
     @Override
     public List<Quota> reportQuota() {
-        QuotaOperator checker = new QuotaOperator() {
-            @Override
-            public void checkQuota(APIMessage msg, Map<String, QuotaPair> pairs) {
-                AccountType type = new QuotaUtil().getAccountType(msg.getSession().getAccountUuid());
-
-                if (type != AccountType.SystemAdmin) {
-                    if (msg instanceof APICreateVmInstanceMsg) {
-                        if (((APICreateVmInstanceMsg) msg).getStrategy().
-                                equals(VmCreationStrategy.JustCreate.toString())) {
-                            return;
-                        }
-                        check((APICreateVmInstanceMsg) msg, pairs);
-                    } else if (msg instanceof APICreateDataVolumeMsg) {
-                        check((APICreateDataVolumeMsg) msg, pairs);
-                    } else if (msg instanceof APIRecoverDataVolumeMsg) {
-                        check((APIRecoverDataVolumeMsg) msg, pairs);
-                    } else if (msg instanceof APIStartVmInstanceMsg) {
-                        check((APIStartVmInstanceMsg) msg, pairs);
-                    } else if (msg instanceof APIChangeResourceOwnerMsg) {
-                        check((APIChangeResourceOwnerMsg) msg, pairs);
-                    } else if (msg instanceof APIRecoverVmInstanceMsg) {
-                        check((APIRecoverVmInstanceMsg) msg, pairs);
-                    }
-                } else {
-                    if (msg instanceof APIChangeResourceOwnerMsg) {
-                        check((APIChangeResourceOwnerMsg) msg, pairs);
-                    }
-                }
-            }
-
-            @Override
-            public void checkQuota(NeedQuotaCheckMessage msg, Map<String, QuotaPair> pairs) {
-                if (!new QuotaUtil().isAdminAccount(msg.getAccountUuid())) {
-                    if (msg instanceof StartVmInstanceMsg) {
-                        check((StartVmInstanceMsg) msg, pairs);
-                    }
-                }
-            }
-
-            @Override
-            public List<Quota.QuotaUsage> getQuotaUsageByAccount(String accountUuid) {
-                List<Quota.QuotaUsage> usages = new ArrayList<>();
-
-                VmQuotaUtil.VmQuota vmQuota = new VmQuotaUtil().getUsedVmCpuMemory(accountUuid);
-                Quota.QuotaUsage usage;
-
-                usage = new Quota.QuotaUsage();
-                usage.setName(VmQuotaConstant.VM_TOTAL_NUM);
-                usage.setUsed(vmQuota.totalVmNum);
-                usages.add(usage);
-
-                usage = new Quota.QuotaUsage();
-                usage.setName(VmQuotaConstant.VM_RUNNING_NUM);
-                usage.setUsed(vmQuota.runningVmNum);
-                usages.add(usage);
-
-                usage = new Quota.QuotaUsage();
-                usage.setName(VmQuotaConstant.VM_RUNNING_CPU_NUM);
-                usage.setUsed(vmQuota.runningVmCpuNum);
-                usages.add(usage);
-
-                usage = new Quota.QuotaUsage();
-                usage.setName(VmQuotaConstant.VM_RUNNING_MEMORY_SIZE);
-                usage.setUsed(vmQuota.runningVmMemorySize);
-                usages.add(usage);
-
-                usage = new Quota.QuotaUsage();
-                usage.setName(VmQuotaConstant.DATA_VOLUME_NUM);
-                usage.setUsed(new VmQuotaUtil().getUsedDataVolumeCount(accountUuid));
-                usages.add(usage);
-
-                usage = new Quota.QuotaUsage();
-                usage.setName(VmQuotaConstant.VOLUME_SIZE);
-                usage.setUsed(new VmQuotaUtil().getUsedAllVolumeSize(accountUuid));
-                usages.add(usage);
-
-                return usages;
-            }
-
-
-            private void check(APIStartVmInstanceMsg msg, Map<String, Quota.QuotaPair> pairs) {
-                checkStartVmInstance(msg.getSession().getAccountUuid(), msg.getVmInstanceUuid(), pairs);
-            }
-
-            private void check(StartVmInstanceMsg msg, Map<String, Quota.QuotaPair> pairs) {
-                checkStartVmInstance(msg.getAccountUuid(), msg.getVmInstanceUuid(), pairs);
-            }
-
-            private void checkStartVmInstance(String currentAccountUuid,
-                                              String vmInstanceUuid,
-                                              Map<String, Quota.QuotaPair> pairs) {
-                String resourceTargetOwnerAccountUuid = new QuotaUtil().getResourceOwnerAccountUuid(vmInstanceUuid);
-                checkVmInstanceQuota(currentAccountUuid, resourceTargetOwnerAccountUuid, vmInstanceUuid, pairs);
-            }
-
-            @Transactional(readOnly = true)
-            private void checkVmInstanceQuota(String currentAccountUuid,
-                                              String resourceTargetOwnerAccountUuid,
-                                              String vmInstanceUuid,
-                                              Map<String, Quota.QuotaPair> pairs) {
-                long vmNumQuota = pairs.get(VmQuotaConstant.VM_RUNNING_NUM).getValue();
-                long cpuNumQuota = pairs.get(VmQuotaConstant.VM_RUNNING_CPU_NUM).getValue();
-                long memoryQuota = pairs.get(VmQuotaConstant.VM_RUNNING_MEMORY_SIZE).getValue();
-
-                VmQuotaUtil.VmQuota vmQuotaUsed = new VmQuotaUtil().getUsedVmCpuMemory(resourceTargetOwnerAccountUuid);
-                //
-                {
-                    QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.VM_RUNNING_NUM;
-                    quotaCompareInfo.quotaValue = vmNumQuota;
-                    quotaCompareInfo.currentUsed = vmQuotaUsed.runningVmNum;
-                    quotaCompareInfo.request = 1;
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-                //
-                VmInstanceVO vm = dbf.getEntityManager().find(VmInstanceVO.class, vmInstanceUuid);
-                {
-                    QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.VM_RUNNING_CPU_NUM;
-                    quotaCompareInfo.quotaValue = cpuNumQuota;
-                    quotaCompareInfo.currentUsed = vmQuotaUsed.runningVmCpuNum;
-                    quotaCompareInfo.request = vm.getCpuNum();
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-                {
-                    QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.VM_RUNNING_MEMORY_SIZE;
-                    quotaCompareInfo.quotaValue = memoryQuota;
-                    quotaCompareInfo.currentUsed = vmQuotaUsed.runningVmMemorySize;
-                    quotaCompareInfo.request = vm.getMemorySize();
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-            }
-
-
-            private void checkVolumeQuotaForChangeResourceOwner(List<String> dataVolumeUuids,
-                                                                List<String> rootVolumeUuids,
-                                                                String resourceTargetOwnerAccountUuid,
-                                                                String currentAccountUuid,
-                                                                Map<String, Quota.QuotaPair> pairs) {
-                long dataVolumeNumQuota = pairs.get(VmQuotaConstant.DATA_VOLUME_NUM).getValue();
-                long allVolumeSizeQuota = pairs.get(VmQuotaConstant.VOLUME_SIZE).getValue();
-
-                ArrayList<String> volumeUuids = new ArrayList<>();
-                if (dataVolumeUuids != null && !dataVolumeUuids.isEmpty()) {
-                    for (String uuid : dataVolumeUuids) {
-                        volumeUuids.add(uuid);
-                    }
-                }
-                if (rootVolumeUuids != null && !rootVolumeUuids.isEmpty()) {
-                    for (String uuid : rootVolumeUuids) {
-                        volumeUuids.add(uuid);
-                    }
-                }
-
-                // skip empty volume uuid list
-                if (volumeUuids.isEmpty()) {
-                    return;
-                }
-                // check data volume num
-                long dataVolumeNumUsed = new VmQuotaUtil().getUsedDataVolumeCount(resourceTargetOwnerAccountUuid);
-                if (dataVolumeUuids != null && !dataVolumeUuids.isEmpty()) {
-                    long dataVolumeNumAsked = dataVolumeUuids.size();
-                    {
-                        QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                        quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                        quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                        quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                        quotaCompareInfo.quotaName = VmQuotaConstant.DATA_VOLUME_NUM;
-                        quotaCompareInfo.quotaValue = dataVolumeNumQuota;
-                        quotaCompareInfo.currentUsed = dataVolumeNumUsed;
-                        quotaCompareInfo.request = dataVolumeNumAsked;
-                        new QuotaUtil().CheckQuota(quotaCompareInfo);
-                    }
-                }
-
-                // check data volume size
-                long allVolumeSizeAsked;
-                String sql = "select sum(size) from VolumeVO where uuid in (:uuids) ";
-                TypedQuery<Long> dq = dbf.getEntityManager().createQuery(sql, Long.class);
-                dq.setParameter("uuids", volumeUuids);
-                Long dsize = dq.getSingleResult();
-                dsize = dsize == null ? 0 : dsize;
-                allVolumeSizeAsked = dsize;
-
-                long allVolumeSizeUsed = new VmQuotaUtil().getUsedAllVolumeSize(resourceTargetOwnerAccountUuid);
-                {
-                    QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.VOLUME_SIZE;
-                    quotaCompareInfo.quotaValue = allVolumeSizeQuota;
-                    quotaCompareInfo.currentUsed = allVolumeSizeUsed;
-                    quotaCompareInfo.request = allVolumeSizeAsked;
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-            }
-
-
-            private void checkRunningVMQuotaForChangeResourceOwner(String vmInstanceUuid,
-                                                                   String resourceTargetOwnerAccountUuid,
-                                                                   String currentAccountUuid,
-                                                                   Map<String, Quota.QuotaPair> pairs) {
-                checkVmInstanceQuota(currentAccountUuid, resourceTargetOwnerAccountUuid, vmInstanceUuid, pairs);
-            }
-
-            @Transactional(readOnly = true)
-            private void check(APIChangeResourceOwnerMsg msg, Map<String, Quota.QuotaPair> pairs) {
-                String currentAccountUuid = msg.getSession().getAccountUuid();
-                String resourceTargetOwnerAccountUuid = msg.getAccountUuid();
-                if (new QuotaUtil().isAdminAccount(resourceTargetOwnerAccountUuid)) {
-                    return;
-                }
-
-                String resourceType = new QuotaUtil().getResourceType(msg.getResourceUuid());
-                if (resourceType.equals(VolumeVO.class.getSimpleName())) {
-                    String volumeUuid = msg.getResourceUuid();
-                    ArrayList<String> volumeUuids = new ArrayList<>();
-                    volumeUuids.add(volumeUuid);
-                    checkVolumeQuotaForChangeResourceOwner(volumeUuids, null,
-                            resourceTargetOwnerAccountUuid, currentAccountUuid, pairs);
-
-                } else if (resourceType.equals(VmInstanceVO.class.getSimpleName())) {
-                    VmInstanceVO vmInstanceVO = dbf.findByUuid(msg.getResourceUuid(), VmInstanceVO.class);
-
-                    // filter vm state
-                    if (vmInstanceVO.getState().equals(VmInstanceState.Created)) {
-                        return;
-                    } else if (!vmInstanceVO.getState().equals(VmInstanceState.Stopped)
-                            && !vmInstanceVO.getState().equals(VmInstanceState.Running)
-                            && !vmInstanceVO.getState().equals(VmInstanceState.Starting)) {
-                        throw new ApiMessageInterceptionException(errf.instantiateErrorCode(VmErrors.NOT_IN_CORRECT_STATE,
-                                String.format("Incorrect VM State.VM[uuid:%s] current state:%s. ",
-                                        msg.getResourceUuid(), vmInstanceVO.getState())
-                        ));
-                    }
-
-                    String vmInstanceUuid = msg.getResourceUuid();
-
-                    // check vm
-                    if (vmInstanceVO.getState().equals(VmInstanceState.Running)) {
-                        checkRunningVMQuotaForChangeResourceOwner(vmInstanceUuid, resourceTargetOwnerAccountUuid,
-                                currentAccountUuid, pairs);
-                    }
-
-                    // check volume
-                    ArrayList<String> rootVolumeUuids = new ArrayList<>();
-                    SimpleQuery<VolumeVO> sq = dbf.createQuery(VolumeVO.class);
-                    sq.add(VolumeVO_.vmInstanceUuid, Op.EQ, vmInstanceUuid);
-                    sq.add(VolumeVO_.type, Op.EQ, VolumeType.Root);
-                    VolumeVO volumeVO = sq.find();
-                    if (volumeVO != null) {
-                        rootVolumeUuids.add(volumeVO.getUuid());
-                    }
-
-                    ArrayList<String> dataVolumeUuids = new ArrayList<>();
-                    SimpleQuery<VolumeVO> sq1 = dbf.createQuery(VolumeVO.class);
-                    sq1.add(VolumeVO_.vmInstanceUuid, Op.EQ, vmInstanceUuid);
-                    sq1.add(VolumeVO_.type, Op.EQ, VolumeType.Data);
-                    List<VolumeVO> volumeVOs = sq1.list();
-                    if (volumeVOs != null && !volumeVOs.isEmpty()) {
-                        for (VolumeVO vvo : volumeVOs) {
-                            dataVolumeUuids.add(vvo.getUuid());
-                        }
-                    }
-
-                    checkVolumeQuotaForChangeResourceOwner(dataVolumeUuids, rootVolumeUuids,
-                            resourceTargetOwnerAccountUuid, currentAccountUuid, pairs);
-                }
-
-            }
-
-            private void check(APIRecoverDataVolumeMsg msg, Map<String, Quota.QuotaPair> pairs) {
-                String currentAccountUuid = msg.getSession().getAccountUuid();
-                String resourceTargetOwnerAccountUuid = new QuotaUtil().getResourceOwnerAccountUuid(msg.getVolumeUuid());
-                // check data volume num
-                long dataVolumeNumQuota = pairs.get(VmQuotaConstant.DATA_VOLUME_NUM).getValue();
-                long dataVolumeNumUsed = new VmQuotaUtil().getUsedDataVolumeCount(resourceTargetOwnerAccountUuid);
-                long dataVolumeNumAsked = 1;
-
-                QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                {
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.DATA_VOLUME_NUM;
-                    quotaCompareInfo.quotaValue = dataVolumeNumQuota;
-                    quotaCompareInfo.currentUsed = dataVolumeNumUsed;
-                    quotaCompareInfo.request = dataVolumeNumAsked;
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-            }
-
-            @Transactional(readOnly = true)
-            private void check(APICreateDataVolumeMsg msg, Map<String, Quota.QuotaPair> pairs) {
-                String currentAccountUuid = msg.getSession().getAccountUuid();
-                String resourceTargetOwnerAccountUuid = msg.getSession().getAccountUuid();
-
-                long dataVolumeNumQuota = pairs.get(VmQuotaConstant.DATA_VOLUME_NUM).getValue();
-                long allVolumeSizeQuota = pairs.get(VmQuotaConstant.VOLUME_SIZE).getValue();
-
-                // check data volume num
-                long dataVolumeNumUsed = new VmQuotaUtil().getUsedDataVolumeCount(currentAccountUuid);
-                long dataVolumeNumAsked = 1;
-                QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                {
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.DATA_VOLUME_NUM;
-                    quotaCompareInfo.quotaValue = dataVolumeNumQuota;
-                    quotaCompareInfo.currentUsed = dataVolumeNumUsed;
-                    quotaCompareInfo.request = dataVolumeNumAsked;
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-
-                // check data volume size
-                long allVolumeSizeAsked;
-                String sql = "select diskSize from DiskOfferingVO where uuid = :uuid ";
-                TypedQuery<Long> dq = dbf.getEntityManager().createQuery(sql, Long.class);
-                dq.setParameter("uuid", msg.getDiskOfferingUuid());
-                Long dsize = dq.getSingleResult();
-                dsize = dsize == null ? 0 : dsize;
-                allVolumeSizeAsked = dsize;
-
-                long allVolumeSizeUsed = new VmQuotaUtil().getUsedAllVolumeSize(currentAccountUuid);
-                {
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.VOLUME_SIZE;
-                    quotaCompareInfo.quotaValue = allVolumeSizeQuota;
-                    quotaCompareInfo.currentUsed = allVolumeSizeUsed;
-                    quotaCompareInfo.request = allVolumeSizeAsked;
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-            }
-
-            @Transactional(readOnly = true)
-            private void check(APICreateVmInstanceMsg msg, Map<String, QuotaPair> pairs) {
-                String currentAccountUuid = msg.getSession().getAccountUuid();
-                String resourceTargetOwnerAccountUuid = msg.getSession().getAccountUuid();
-
-                long totalVmNumQuota = pairs.get(VmQuotaConstant.VM_TOTAL_NUM).getValue();
-                long runningVmNumQuota = pairs.get(VmQuotaConstant.VM_RUNNING_NUM).getValue();
-                long runningVmCpuNumQuota = pairs.get(VmQuotaConstant.VM_RUNNING_CPU_NUM).getValue();
-                long runningVmMemorySizeQuota = pairs.get(VmQuotaConstant.VM_RUNNING_MEMORY_SIZE).getValue();
-                long dataVolumeNumQuota = pairs.get(VmQuotaConstant.DATA_VOLUME_NUM).getValue();
-                long allVolumeSizeQuota = pairs.get(VmQuotaConstant.VOLUME_SIZE).getValue();
-
-
-                VmQuotaUtil.VmQuota vmQuotaUsed = new VmQuotaUtil().getUsedVmCpuMemory(currentAccountUuid);
-
-                if (vmQuotaUsed.totalVmNum + 1 > totalVmNumQuota) {
-                    throw new ApiMessageInterceptionException(new QuotaUtil().buildQuataExceedError(
-                                    currentAccountUuid, VmQuotaConstant.VM_TOTAL_NUM, totalVmNumQuota));
-                }
-
-                if (vmQuotaUsed.runningVmNum + 1 > runningVmNumQuota) {
-                    throw new ApiMessageInterceptionException(new QuotaUtil().buildQuataExceedError(
-                                    currentAccountUuid, VmQuotaConstant.VM_RUNNING_NUM, runningVmNumQuota));
-                }
-
-                String sql = "select i.cpuNum, i.memorySize" +
-                        " from InstanceOfferingVO i" +
-                        " where i.uuid = :uuid";
-                TypedQuery<Tuple> iq = dbf.getEntityManager().createQuery(sql, Tuple.class);
-                iq.setParameter("uuid", msg.getInstanceOfferingUuid());
-                Tuple it = iq.getSingleResult();
-                int cpuNumAsked = it.get(0, Integer.class);
-                long memoryAsked = it.get(1, Long.class);
-
-                if (vmQuotaUsed.runningVmCpuNum + cpuNumAsked > runningVmCpuNumQuota) {
-                    throw new ApiMessageInterceptionException(new QuotaUtil().buildQuataExceedError(
-                                    currentAccountUuid, VmQuotaConstant.VM_RUNNING_CPU_NUM, runningVmCpuNumQuota));
-                }
-
-                if (vmQuotaUsed.runningVmMemorySize + memoryAsked > runningVmMemorySizeQuota) {
-                    throw new ApiMessageInterceptionException(new QuotaUtil().buildQuataExceedError(
-                                    currentAccountUuid, VmQuotaConstant.VM_RUNNING_MEMORY_SIZE, runningVmMemorySizeQuota));
-                }
-
-                // check data volume num
-                if (msg.getDataDiskOfferingUuids() != null && !msg.getDataDiskOfferingUuids().isEmpty()) {
-                    long dataVolumeNumUsed = new VmQuotaUtil().getUsedDataVolumeCount(currentAccountUuid);
-                    long dataVolumeNumAsked = msg.getDataDiskOfferingUuids().size();
-                    if (dataVolumeNumUsed + dataVolumeNumAsked > dataVolumeNumQuota) {
-                        throw new ApiMessageInterceptionException(new QuotaUtil().buildQuataExceedError(
-                                        currentAccountUuid, VmQuotaConstant.DATA_VOLUME_NUM, dataVolumeNumQuota));
-                    }
-                }
-
-                // check all volume size
-                long allVolumeSizeAsked = 0;
-
-                sql = "select img.size, img.mediaType" +
-                        " from ImageVO img" +
-                        " where img.uuid = :iuuid";
-                iq = dbf.getEntityManager().createQuery(sql, Tuple.class);
-                iq.setParameter("iuuid", msg.getImageUuid());
-                it = iq.getSingleResult();
-                Long imgSize = it.get(0, Long.class);
-                ImageMediaType imgType = it.get(1, ImageMediaType.class);
-
-                List<String> diskOfferingUuids = new ArrayList<>();
-                if (msg.getDataDiskOfferingUuids() != null && !msg.getDataDiskOfferingUuids().isEmpty()) {
-                    diskOfferingUuids.addAll(msg.getDataDiskOfferingUuids());
-                }
-                if (imgType == ImageMediaType.RootVolumeTemplate) {
-                    allVolumeSizeAsked += imgSize;
-                } else if (imgType == ImageMediaType.ISO) {
-                    diskOfferingUuids.add(msg.getRootDiskOfferingUuid());
-                }
-
-                HashMap<String, Long> diskOfferingCountMap = new HashMap<>();
-                if (!diskOfferingUuids.isEmpty()) {
-                    for (String diskOfferingUuid : diskOfferingUuids) {
-                        if (diskOfferingCountMap.containsKey(diskOfferingUuid)) {
-                            diskOfferingCountMap.put(diskOfferingUuid, diskOfferingCountMap.get(diskOfferingUuid) + 1);
-                        } else {
-                            diskOfferingCountMap.put(diskOfferingUuid, 1L);
-                        }
-                    }
-                    for (String diskOfferingUuid : diskOfferingCountMap.keySet()) {
-                        sql = "select diskSize from DiskOfferingVO where uuid = :uuid";
-                        TypedQuery<Long> dq = dbf.getEntityManager().createQuery(sql, Long.class);
-                        dq.setParameter("uuid", diskOfferingUuid);
-                        Long dsize = dq.getSingleResult();
-                        dsize = dsize == null ? 0 : dsize;
-                        allVolumeSizeAsked += dsize * diskOfferingCountMap.get(diskOfferingUuid);
-                    }
-                }
-
-                long allVolumeSizeUsed = new VmQuotaUtil().getUsedAllVolumeSize(currentAccountUuid);
-                QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                {
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.VOLUME_SIZE;
-                    quotaCompareInfo.quotaValue = allVolumeSizeQuota;
-                    quotaCompareInfo.currentUsed = allVolumeSizeUsed;
-                    quotaCompareInfo.request = allVolumeSizeAsked;
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-            }
-
-            private void check(APIRecoverVmInstanceMsg msg, Map<String, QuotaPair> pairs) {
-                String currentAccountUuid = msg.getSession().getAccountUuid();
-                String resourceTargetOwnerAccountUuid = msg.getSession().getAccountUuid();
-
-                long totalVmNumQuota = pairs.get(VmQuotaConstant.VM_TOTAL_NUM).getValue();
-                VmQuotaUtil.VmQuota vmQuotaUsed = new VmQuotaUtil().getUsedVmCpuMemory(currentAccountUuid);
-                long totalVmNumAsked = 1;
-                QuotaUtil.QuotaCompareInfo quotaCompareInfo;
-                {
-                    quotaCompareInfo = new QuotaUtil.QuotaCompareInfo();
-                    quotaCompareInfo.currentAccountUuid = currentAccountUuid;
-                    quotaCompareInfo.resourceTargetOwnerAccountUuid = resourceTargetOwnerAccountUuid;
-                    quotaCompareInfo.quotaName = VmQuotaConstant.VM_TOTAL_NUM;
-                    quotaCompareInfo.quotaValue = totalVmNumQuota;
-                    quotaCompareInfo.currentUsed = vmQuotaUsed.totalVmNum;
-                    quotaCompareInfo.request = totalVmNumAsked;
-                    new QuotaUtil().CheckQuota(quotaCompareInfo);
-                }
-            }
-        };
+        QuotaOperator checker = new VmQuotaOperator() ;
 
         Quota quota = new Quota();
         QuotaPair p;
@@ -1803,7 +1493,6 @@ public class VmInstanceManagerImpl extends AbstractService implements
         quota.setOperator(checker);
 
         return list(quota);
-
     }
 
     @Override

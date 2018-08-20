@@ -37,6 +37,7 @@ class VirtualRouterNetworkServiceEnv {
                 image {
                     name = "vr"
                     url = "http://zstack.org/download/vr.qcow2"
+                    system = true
                 }
             }
 
@@ -100,6 +101,11 @@ class VirtualRouterNetworkServiceEnv {
                             gateway = "11.168.100.1"
                         }
                     }
+                }
+
+                l2NoVlanNetwork {
+                    name = "l2-1"
+                    physicalInterface = "eth1"
                 }
 
                 attachBackupStorage("sftp")
@@ -234,6 +240,22 @@ class VirtualRouterNetworkServiceEnv {
                             endIp = "192.168.100.100"
                             netmask = "255.255.255.0"
                             gateway = "192.168.100.1"
+                        }
+                    }
+
+                    l3Network {
+                        name = "l3-1"
+
+                        service {
+                            provider = VyosConstants.VYOS_ROUTER_PROVIDER_TYPE
+                            types = [NetworkServiceType.Centralized_DNS.toString()]
+                        }
+
+                        ip {
+                            startIp = "192.168.101.10"
+                            endIp = "192.168.101.100"
+                            netmask = "255.255.255.0"
+                            gateway = "192.168.101.1"
                         }
                     }
 

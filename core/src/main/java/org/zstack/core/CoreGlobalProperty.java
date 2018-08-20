@@ -52,4 +52,10 @@ public class CoreGlobalProperty {
     public static String LOG_DIR;
     @GlobalProperty(name="chrony.serverIp.")
     public static List<String> CHRONY_SERVERS;
+    @GlobalProperty(name = "simulatorsOn", defaultValue = "false")
+    public static boolean SIMULATORS_ON;
+    @GlobalProperty(name = "updatePkgWhenConnect", defaultValue = "false")
+    public static boolean UPDATE_PKG_WHEN_CONNECT;
+    @GlobalProperty(name = "syncNodeTime", defaultValue = "true")
+    public static boolean SYNC_NODE_TIME;
 }

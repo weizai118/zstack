@@ -60,7 +60,6 @@ import org.zstack.utils.path.PathUtil;
 import javax.persistence.Tuple;
 import javax.persistence.TypedQuery;
 import java.io.File;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -225,7 +224,6 @@ public class NfsPrimaryStorage extends PrimaryStorageBase {
         if (bkd == null) {
             throw new OperationFailureException(operr("cannot find usable backend"));
         }
-        PrimaryStorageVO ps = dbf.findByUuid(msg.getPrimaryStorageUuid(), PrimaryStorageVO.class);
         DeleteImageCacheOnPrimaryStorageReply sreply = new DeleteImageCacheOnPrimaryStorageReply();
         FlowChain chain = FlowChainBuilder.newSimpleFlowChain();
         chain.setName(String.format("delete-image-cache-on-nfs-primary-storage-%s", msg.getPrimaryStorageUuid()));
@@ -826,8 +824,7 @@ public class NfsPrimaryStorage extends PrimaryStorageBase {
         final DeleteVolumeOnPrimaryStorageReply reply = new DeleteVolumeOnPrimaryStorageReply();
         final VolumeInventory vol = msg.getVolume();
         final NfsPrimaryStorageBackend backend = getBackend(nfsMgr.findHypervisorTypeByImageFormatAndPrimaryStorageUuid(vol.getFormat(), self.getUuid()));
-        String volumeFolder = PathUtil.parentFolder(vol.getInstallPath());
-        backend.deleteFolder(getSelfInventory(), volumeFolder, new Completion(msg) {
+        backend.delete(getSelfInventory(), vol.getInstallPath(), new Completion(msg) {
             @Override
             public void success() {
                 logger.debug(String.format("successfully delete volume[uuid:%s, installPath:%s] on nfs primary storage[uuid:%s]", vol.getUuid(),
@@ -1017,15 +1014,6 @@ public class NfsPrimaryStorage extends PrimaryStorageBase {
                 }
             });
         }
-    }
-
-    private String getAvailableHostUuidForOperation() {
-        List<String> hostUuids = Q.New(PrimaryStorageHostRefVO.class).
-                eq(PrimaryStorageHostRefVO_.primaryStorageUuid, self.getUuid()).select(PrimaryStorageHostRefVO_.hostUuid).listValues();
-        if (hostUuids == null || hostUuids.size() == 0) {
-            return null;
-        }
-        return hostUuids.get(0);
     }
 
     @Override
@@ -1308,5 +1296,33 @@ public class NfsPrimaryStorage extends PrimaryStorageBase {
         } else {
             backend.getPhysicalCapacity(getSelfInventory(), completion);
         }
+    }
+
+    private String getAvailableHostUuidForOperation() {
+        List<String> hostUuids = Q.New(PrimaryStorageHostRefVO.class).
+                eq(PrimaryStorageHostRefVO_.primaryStorageUuid, self.getUuid()).select(PrimaryStorageHostRefVO_.hostUuid).listValues();
+        if (hostUuids == null || hostUuids.size() == 0) {
+            return null;
+        }
+        return hostUuids.get(0);
+    }
+
+    @Override
+    public void handle(AskInstallPathForNewSnapshotMsg msg) {
+        NfsPrimaryStorageBackend bkd = getUsableBackend();
+        bkd.handle(getSelfInventory(), msg, new ReturnValueCompletion<AskInstallPathForNewSnapshotReply>(msg) {
+            @Override
+            public void success(AskInstallPathForNewSnapshotReply returnValue) {
+                bus.reply(msg, returnValue);
+            }
+
+            @Override
+            public void fail(ErrorCode errorCode) {
+                AskInstallPathForNewSnapshotReply reply = new AskInstallPathForNewSnapshotReply();
+                reply.setSuccess(false);
+                reply.setError(errorCode);
+                bus.reply(msg, reply);
+            }
+        });
     }
 }

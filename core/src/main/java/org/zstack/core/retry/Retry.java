@@ -11,18 +11,44 @@ import static org.zstack.core.Platform.i18n;
 
 import java.lang.reflect.Method;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Created by xing5 on 2016/6/25.
  */
 public abstract class Retry<T> {
+    public static class RetryException extends RuntimeException {
+        public RetryException() {
+        }
 
-    private int times, count = 5;
-    private int interval = 1;
+        public RetryException(String message) {
+            super(message);
+        }
+
+        public RetryException(String message, Throwable cause) {
+            super(message, cause);
+        }
+
+        public RetryException(Throwable cause) {
+            super(cause);
+        }
+
+        public RetryException(String message, Throwable cause, boolean enableSuppression, boolean writableStackTrace) {
+            super(message, cause, enableSuppression, writableStackTrace);
+        }
+    }
+
+    protected int times, count = 5;
+    protected int interval = 1;
 
     private static final CLogger logger = Utils.getLogger(Retry.class);
 
     protected abstract T call();
+
+    // return true to continue to throw out the exception
+    protected boolean onFailure(Throwable t) {
+        return true;
+    }
 
     protected String __name__;
 
@@ -78,7 +104,11 @@ public abstract class Retry<T> {
                     errorCode.setDetails(t.getMessage());
                     logger.warn(errorCode.toString(), t);
 
-                    throw t;
+                    if (onFailure(t)) {
+                        throw t;
+                    }
+
+                    return null;
                 }
             }
         } while (true);

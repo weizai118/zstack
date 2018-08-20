@@ -19,6 +19,8 @@ import org.zstack.header.message.APIMessage;
 import org.zstack.header.network.l3.*;
 import org.zstack.header.zone.ZoneVO;
 import org.zstack.header.zone.ZoneVO_;
+import org.zstack.utils.Utils;
+import org.zstack.utils.logging.CLogger;
 import org.zstack.utils.network.NetworkUtils;
 
 import static org.zstack.core.Platform.argerr;
@@ -40,6 +42,8 @@ public class L3NetworkApiInterceptor implements ApiMessageInterceptor {
     private DatabaseFacade dbf;
     @Autowired
     private ErrorFacade errf;
+
+    private final static CLogger logger = Utils.getLogger(L3NetworkApiInterceptor.class);
 
     private void setServiceId(APIMessage msg) {
         if (msg instanceof IpRangeMessage) {
@@ -323,14 +327,21 @@ public class L3NetworkApiInterceptor implements ApiMessageInterceptor {
         }
 
         String cidr = ipr.toSubnetUtils().getInfo().getCidrSignature();
+        L3NetworkVO l3Vo = dbf.findByUuid(ipr.getL3NetworkUuid(), L3NetworkVO.class);
+        List<String> l3Uuids = Q.New(L3NetworkVO.class).eq(L3NetworkVO_.l2NetworkUuid, l3Vo.getL2NetworkUuid()).select(L3NetworkVO_.uuid).listValues();
         SimpleQuery<IpRangeVO> q = dbf.createQuery(IpRangeVO.class);
-        q.add(IpRangeVO_.l3NetworkUuid, Op.EQ, ipr.getL3NetworkUuid());
+        q.add(IpRangeVO_.l3NetworkUuid, Op.IN, l3Uuids);
         List<IpRangeVO> ranges = q.list();
         for (IpRangeVO r : ranges) {
             if (NetworkUtils.isIpv4RangeOverlap(ipr.getStartIp(), ipr.getEndIp(), r.getStartIp(), r.getEndIp())) {
                 throw new ApiMessageInterceptionException(argerr("overlap with ip range[uuid:%s, start ip:%s, end ip: %s]", r.getUuid(), r.getStartIp(), r.getEndIp()));
             }
 
+            if (!r.getL3NetworkUuid().equals(ipr.getL3NetworkUuid())) {
+                continue;
+            }
+
+            /* same l3 network can have only 1 cidr */
             String rcidr = IpRangeInventory.valueOf(r).toSubnetUtils().getInfo().getCidrSignature();
             if (!cidr.equals(rcidr)) {
                 throw new ApiMessageInterceptionException(argerr("multiple CIDR on the same L3 network is not allowed. There has been a IP" +

@@ -8,13 +8,14 @@ import org.zstack.core.cloudbus.MessageSafe;
 import org.zstack.core.componentloader.PluginRegistry;
 import org.zstack.core.errorcode.ErrorFacade;
 import org.zstack.core.thread.SyncTask;
-import org.zstack.core.thread.SyncThread;
 import org.zstack.core.thread.ThreadFacade;
 import org.zstack.core.thread.ThreadGlobalProperty;
-import org.zstack.header.errorcode.OperationFailureException;
 import org.zstack.header.AbstractService;
 import org.zstack.header.apimediator.ApiMessageInterceptionException;
 import org.zstack.header.apimediator.GlobalApiMessageInterceptor;
+import org.zstack.header.core.ReturnValueCompletion;
+import org.zstack.header.errorcode.ErrorCode;
+import org.zstack.header.errorcode.OperationFailureException;
 import org.zstack.header.exception.CloudRuntimeException;
 import org.zstack.header.message.APIMessage;
 import org.zstack.header.message.Message;
@@ -28,12 +29,16 @@ import org.zstack.utils.TypeUtils;
 import org.zstack.utils.Utils;
 import org.zstack.utils.gson.JSONObjectUtil;
 import org.zstack.utils.logging.CLogger;
-
-import static org.zstack.core.Platform.argerr;
+import org.zstack.zql.ZQL;
+import org.zstack.zql.ZQLContext;
+import org.zstack.zql.ZQLQueryReturn;
+import org.zstack.zql.ast.ZQLMetadata;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.*;
+
+import static org.zstack.core.Platform.argerr;
 
 public class QueryFacadeImpl extends AbstractService implements QueryFacade, GlobalApiMessageInterceptor {
     private static CLogger logger = Utils.getLogger(QueryFacadeImpl.class);
@@ -49,6 +54,9 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
     @Autowired
     private ThreadFacade thdf;
 
+    public static final String USER_TAG = "__userTag__";
+    public static final String SYSTEM_TAG = "__systemTag__";
+
     private void validateConditions(List<QueryCondition> conditions) {
         for (QueryCondition cond : conditions) {
             // will throw out IllegalArgumentException if op is invalid
@@ -59,19 +67,15 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
     @Override
     public <T> List<T> query(APIQueryMessage msg, Class<T> inventoryClass) {
         validateConditions(msg.getConditions());
-
-        QueryBuilderFactory factory = getFactory(queryBuilderType);
-        QueryBuilder builder = factory.createQueryBuilder();
-        return builder.query(msg, inventoryClass);
+        ZQLQueryReturn result = queryUseZQL(msg, inventoryClass);
+        return result.inventories;
     }
 
     @Override
     public long count(APIQueryMessage msg, Class inventoryClass) {
         validateConditions(msg.getConditions());
-
-        QueryBuilderFactory factory = getFactory(queryBuilderType);
-        QueryBuilder builder = factory.createQueryBuilder();
-        return builder.count(msg, inventoryClass);
+        ZQLQueryReturn result = queryUseZQL(msg, inventoryClass);
+        return result.total;
     }
 
     private void populateExtensions() {
@@ -98,7 +102,7 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
             return;
         }
 
-        List<Class> inventoryClasses = BeanUtils.scanClass("org.zstack", Inventory.class);
+        Set<Class<?>> inventoryClasses = BeanUtils.reflections.getTypesAnnotatedWith(Inventory.class);
         List<String> errors = new ArrayList<>();
         for (Class clz : inventoryClasses) {
             boolean error = false;
@@ -154,9 +158,59 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
             handle((APIGenerateQueryableFieldsMsg) msg);
         } else if (msg instanceof APIBatchQueryMsg) {
             handle((APIBatchQueryMsg) msg);
+        } else if (msg instanceof APIZQLQueryMsg) {
+            handle((APIZQLQueryMsg) msg);
         } else {
             bus.dealWithUnknownMessage(msg);
         }
+    }
+
+    private void handle(APIZQLQueryMsg msg) {
+        thdf.syncSubmit(new SyncTask<Void>() {
+            @Override
+            public Void call() {
+                APIZQLQueryReply reply = new APIZQLQueryReply();
+                ZQLContext.putAPISession(msg.getSession());
+
+                // use doCall to make message exception safe
+                doCall(new ReturnValueCompletion<List<ZQLQueryReturn>>(msg) {
+                    @Override
+                    public void success(List<ZQLQueryReturn> returnValue) {
+                        ZQLContext.cleanAPISession();
+                        reply.setResults(returnValue);
+                        bus.reply(msg, reply);
+                    }
+
+                    @Override
+                    public void fail(ErrorCode errorCode) {
+                        ZQLContext.cleanAPISession();
+                        reply.setError(errorCode);
+                        bus.reply(msg, reply);
+                    }
+                });
+
+                return null;
+            }
+
+            private void doCall(ReturnValueCompletion<List<ZQLQueryReturn>> completion) {
+                completion.success(ZQL.fromString(msg.getZql()).getResultList());
+            }
+
+            @Override
+            public String getName() {
+                return getSyncSignature();
+            }
+
+            @Override
+            public String getSyncSignature() {
+                return "zql";
+            }
+
+            @Override
+            public int getSyncLevel() {
+                return ThreadGlobalProperty.MAX_THREAD_NUM / 3;
+            }
+        });
     }
 
     private void handle(APIBatchQueryMsg msg) {
@@ -164,9 +218,25 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
             @Override
             public Void call() {
                 APIBatchQueryReply reply = new APIBatchQueryReply();
-                reply.setResult(new BatchQuery().query(msg));
-                bus.reply(msg, reply);
+                doCall(new ReturnValueCompletion<Map<String, Object>>(msg) {
+                    @Override
+                    public void success(Map<String, Object> returnValue) {
+                        reply.setResult(returnValue);
+                        bus.reply(msg, reply);
+                    }
+
+                    @Override
+                    public void fail(ErrorCode errorCode) {
+                        reply.setError(errorCode);
+                        bus.reply(msg, reply);
+                    }
+                });
                 return null;
+            }
+
+            // use doCall to make message exception safe
+            private void doCall(ReturnValueCompletion<Map<String,Object>> completion) {
+                completion.success(new BatchQuery().query(msg));
             }
 
             @Override
@@ -181,7 +251,7 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
 
             @Override
             public int getSyncLevel() {
-                return ThreadGlobalProperty.MAX_THREAD_NUM / 2;
+                return ThreadGlobalProperty.MAX_THREAD_NUM / 3;
             }
         });
     }
@@ -205,6 +275,31 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
     private Map<Class, Method> replySetter = new HashMap<>();
     private Map<Class, AutoQuery> autoQueryMap = new HashMap<>();
 
+    private Method getReplySetter(AutoQuery at) {
+        Class replyClass = at.replyClass();
+        Class inventoryClass = at.inventoryClass();
+        try {
+            Method setter = replySetter.get(inventoryClass);
+            if (setter == null) {
+                setter = replyClass.getDeclaredMethod("setInventories", List.class);
+                if (setter == null) {
+                    throw new OperationFailureException(errf.stringToInternalError(
+                            String.format("query reply[%s] has no method setInventories()", replyClass.getName())
+                    ));
+                }
+                setter.setAccessible(true);
+                replySetter.put(inventoryClass, setter);
+            }
+
+            return setter;
+        } catch (OperationFailureException of) {
+            throw of;
+        } catch (Exception e) {
+            logger.warn(e.getMessage(), e);
+            throw new OperationFailureException(errf.throwableToInternalError(e));
+        }
+    }
+
     private void handle(APIQueryMessage msg) {
         AutoQuery at = autoQueryMap.get(msg.getClass());
         if (at == null) {
@@ -219,8 +314,26 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
 
         Class replyClass = at.replyClass();
         Class inventoryClass = at.inventoryClass();
+
         try {
-            APIQueryReply reply = (APIQueryReply) replyClass.newInstance();
+            APIQueryReply reply = (APIQueryReply) replyClass.getConstructor().newInstance();
+            Method replySetter = getReplySetter(at);
+            ZQLQueryReturn result = queryUseZQL(msg, inventoryClass);
+            if (result.total != null) {
+                reply.setTotal(result.total);
+            }
+            if (result.inventories != null) {
+                replySetter.invoke(reply, result.inventories);
+            }
+            bus.reply(msg, reply);
+        } catch (OperationFailureException of) {
+            throw of;
+        } catch (Exception e) {
+            throw new CloudRuntimeException(e);
+        }
+
+            /*
+        try {
             Method setter = replySetter.get(inventoryClass);
             if (setter == null) {
                 setter = replyClass.getDeclaredMethod("setInventories", List.class);
@@ -253,6 +366,96 @@ public class QueryFacadeImpl extends AbstractService implements QueryFacade, Glo
             logger.warn(e.getMessage(), e);
             throw new OperationFailureException(errf.throwableToInternalError(e));
         }
+            */
+    }
+
+    private String toZQLConditionString(QueryCondition c) {
+        // make every condition value as string, the ZQL
+        // will put them in right type because it knows every field's type
+
+        QueryOp op = QueryOp.valueOf(c.getOp());
+        if (c.getValue() == null) {
+            return String.format("%s %s", c.getName(), c.getOp());
+        } else if (op == QueryOp.IN || op == QueryOp.NOT_IN) {
+            List<String> values = new ArrayList<>();
+            for (String v : c.getValue().split(",")) {
+                values.add(String.format("'%s'", v));
+            }
+
+            if (values.isEmpty()) {
+                // use '' to represent an empty collection
+                values.add("''");
+            }
+
+            return String.format("%s %s (%s)", c.getName(), c.getOp(), StringUtils.join(values, ","));
+        } else {
+            return String.format("%s %s '%s'", c.getName(), c.getOp(), c.getValue());
+        }
+    }
+
+    private Class getQueryTargetInventoryClass(APIQueryMessage msg, Class inventoryClass) {
+        Field tf = ZQLMetadata.getTypeFieldOfInventoryClass(inventoryClass);
+        if (tf == null) {
+            return inventoryClass;
+        }
+
+        Optional<QueryCondition> opt = msg.getConditions().stream().filter(c->c.getName().equals(tf.getName())).findFirst();
+        if (!opt.isPresent()) {
+            return inventoryClass;
+        }
+
+        QueryCondition condition = opt.get();
+
+        if (!condition.getOp().equals(QueryOp.EQ.toString())) {
+            return inventoryClass;
+        }
+
+        return ZQLMetadata.getChildInventoryClassByType(inventoryClass, condition.getValue());
+    }
+
+    public ZQLQueryReturn queryUseZQL(APIQueryMessage msg, Class inventoryClass) {
+        List<String> sb = new ArrayList<>();
+        sb.add(msg.isCount() ? "count" : "query");
+        Class targetInventoryClass = getQueryTargetInventoryClass(msg, inventoryClass);
+        sb.add(msg.getFields() == null || msg.getFields().isEmpty() ? ZQL.queryTargetNameFromInventoryClass(targetInventoryClass) : ZQL.queryTargetNameFromInventoryClass(targetInventoryClass) + "." + StringUtils.join(msg.getFields(), ","));
+
+        if (msg.getConditions() != null && !msg.getConditions().isEmpty()) {
+            List<String> conds = new ArrayList<>();
+            msg.getConditions().forEach(c -> {
+                conds.add(toZQLConditionString(c));
+            });
+
+            if (!conds.isEmpty()) {
+                sb.add("where");
+                sb.add(StringUtils.join(conds, " and "));
+            }
+        }
+
+        if (!msg.isCount() && msg.isReplyWithCount()) {
+            sb.add("return with (total)");
+        }
+
+        if (msg.getSortBy() != null) {
+            sb.add(String.format("order by %s %s", msg.getSortBy(), msg.getSortDirection()));
+        }
+
+        if (msg.getLimit() != null) {
+            sb.add(String.format("limit %s", msg.getLimit()));
+        }
+
+        if (msg.getStart() != null) {
+            sb.add(String.format("offset %s", msg.getStart()));
+        }
+
+        ZQLContext.putAPISession(msg.getSession());
+        String text = StringUtils.join(sb, " ");
+        if (logger.isTraceEnabled()) {
+            logger.trace(text);
+        }
+        ZQL zql = ZQL.fromString(text);
+        ZQLQueryReturn result = zql.getSingleResult();
+        ZQLContext.cleanAPISession();
+        return result;
     }
 
     private void handle(APIGenerateInventoryQueryDetailsMsg msg) {

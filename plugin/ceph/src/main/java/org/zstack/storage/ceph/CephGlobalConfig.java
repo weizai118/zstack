@@ -11,7 +11,7 @@ import org.zstack.core.config.GlobalConfigValidation;
 public class CephGlobalConfig {
     public static final String CATEGORY = "ceph";
 
-    @GlobalConfigValidation(numberGreaterThan = 0)
+    @GlobalConfigValidation(numberGreaterThan = 1)
     public static GlobalConfig IMAGE_CACHE_CLEANUP_INTERVAL = new GlobalConfig(CATEGORY, "imageCache.cleanup.interval");
     @GlobalConfigValidation
     public static GlobalConfig PRIMARY_STORAGE_DELETE_POOL = new GlobalConfig(CATEGORY, "primaryStorage.deletePool");
@@ -23,4 +23,6 @@ public class CephGlobalConfig {
     public static GlobalConfig BACKUP_STORAGE_MON_RECONNECT_DELAY = new GlobalConfig(CATEGORY, "backupStorage.mon.reconnectDelay");
     @GlobalConfigValidation
     public static GlobalConfig BACKUP_STORAGE_MON_AUTO_RECONNECT = new GlobalConfig(CATEGORY, "backupStorage.mon.autoReconnect");
+    @GlobalConfigValidation
+    public static GlobalConfig GC_INTERVAL = new GlobalConfig(CATEGORY, "deletion.gcInterval");
 }

@@ -4,6 +4,7 @@ import org.zstack.core.validation.ConditionalValidation;
 import org.zstack.header.cluster.APIUpdateClusterOSMsg;
 import org.zstack.header.core.ApiTimeout;
 import org.zstack.header.core.validation.Validation;
+import org.zstack.header.host.APIReconnectHostMsg;
 import org.zstack.header.storage.snapshot.APIDeleteVolumeSnapshotMsg;
 import org.zstack.header.vm.APICreateVmInstanceMsg;
 import org.zstack.header.vm.APIMigrateVmMsg;
@@ -12,10 +13,7 @@ import org.zstack.header.volume.APICreateVolumeSnapshotMsg;
 import org.zstack.network.securitygroup.SecurityGroupMembersTO;
 import org.zstack.network.securitygroup.SecurityGroupRuleTO;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class KVMAgentCommands {
     public enum BootDev {
@@ -61,6 +59,7 @@ public class KVMAgentCommands {
     }
 
     public static class AgentCommand {
+        public LinkedHashMap kvmHostAddons;
     }
 
     public static class CheckVmStateCmd extends AgentCommand {
@@ -241,6 +240,15 @@ public class KVMAgentCommands {
     }
 
     public static class HostFactCmd extends AgentCommand {
+        private boolean ignoreMsrs;
+
+        public boolean isIgnoreMsrs() {
+            return ignoreMsrs;
+        }
+
+        public void setIgnoreMsrs(boolean ignoreMsrs) {
+            this.ignoreMsrs = ignoreMsrs;
+        }
     }
 
     public static class HostFactResponse extends AgentResponse {
@@ -543,6 +551,66 @@ public class KVMAgentCommands {
 
     }
 
+    public static class VolumeSnapshotJobTO {
+        public String vmInstanceUuid;
+        public String installPath;
+        public String previousInstallPath;
+        public String newVolumeInstallPath;
+        public String live;
+        public String full;
+
+        public VolumeSnapshotJobTO() {
+        }
+
+        public String getVmInstanceUuid() {
+            return vmInstanceUuid;
+        }
+
+        public void setVmInstanceUuid(String vmInstanceUuid) {
+            this.vmInstanceUuid = vmInstanceUuid;
+        }
+
+        public String getInstallPath() {
+            return installPath;
+        }
+
+        public void setInstallPath(String installPath) {
+            this.installPath = installPath;
+        }
+
+        public String getPreviousInstallPath() {
+            return previousInstallPath;
+        }
+
+        public void setPreviousInstallPath(String previousInstallPath) {
+            this.previousInstallPath = previousInstallPath;
+        }
+
+        public String getNewVolumeInstallPath() {
+            return newVolumeInstallPath;
+        }
+
+        public void setNewVolumeInstallPath(String newVolumeInstallPath) {
+            this.newVolumeInstallPath = newVolumeInstallPath;
+        }
+
+        public String getLive() {
+            return live;
+        }
+
+        public void setLive(String live) {
+            this.live = live;
+        }
+
+        public String getFull() {
+            return full;
+        }
+
+        public void setFull(String full) {
+            this.full = full;
+        }
+    }
+
     public static class VolumeTO {
         public static final String FILE = "file";
         public static final String ISCSI = "iscsi";
@@ -790,9 +858,37 @@ public class KVMAgentCommands {
         private String usbRedirect;
         private Integer VDIMonitorNumber;
         private boolean useBootMenu;
+        private boolean createPaused;
         private boolean kvmHiddenState;
         private boolean vmPortOff;
         private String vmCpuModel;
+        private boolean emulateHyperV;
+        private boolean isApplianceVm;
+        private String systemSerialNumber;
+
+        public boolean isEmulateHyperV() {
+            return emulateHyperV;
+        }
+
+        public void setEmulateHyperV(boolean emulateHyperV) {
+            this.emulateHyperV = emulateHyperV;
+        }
+
+        public boolean isApplianceVm() {
+            return isApplianceVm;
+        }
+
+        public void setApplianceVm(boolean applianceVm) {
+            isApplianceVm = applianceVm;
+        }
+
+        public String getSystemSerialNumber() {
+            return systemSerialNumber;
+        }
+
+        public void setSystemSerialNumber(String systemSerialNumber) {
+            this.systemSerialNumber = systemSerialNumber;
+        }
 
         public String getVmCpuModel() {
             return vmCpuModel;
@@ -840,6 +936,14 @@ public class KVMAgentCommands {
 
         public boolean isUseBootMenu() {
             return useBootMenu;
+        }
+
+        public void setCreatePaused(boolean createPaused) {
+            this.createPaused = createPaused;
+        }
+
+        public boolean isCreatePaused() {
+            return createPaused;
         }
 
         public String getUsbRedirect() {
@@ -1738,6 +1842,14 @@ public class KVMAgentCommands {
     }
 
     public static class UpdateHostOSRsp extends AgentResponse {
+    }
+
+    @ApiTimeout(apiClasses = APIReconnectHostMsg.class)
+    public static class UpdateDependencyCmd extends AgentCommand {
+        public String hostUuid;
+    }
+
+    public static class UpdateDependencyRsp extends AgentResponse {
     }
 
     public static class ReportVmStateCmd {
